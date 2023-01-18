@@ -3050,7 +3050,7 @@ public class VenicePushJob implements AutoCloseable {
   public static void main(String[] args) {
 
     if (args.length != 1) {
-      Utils.exit("USAGE: java -jar venice-push-job-all.jar <VPJ_config_file_path>");
+      Utils.exit("[Failure] Please double-check the USAGE: java -jar venice-push-job-all.jar <VPJ_config_file_path>");
     }
     Properties properties = new Properties();
     try {
