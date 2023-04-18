@@ -25,7 +25,6 @@ def read_config(bump_major, bump_minor, no_verify, github_actor):
     if bump_major and bump_minor:
         print('Cannot bump major and minor versions. Only bumping major version')
         bump_minor = False
-
     run(bump_major, bump_minor, not no_verify, github_actor)
 
 
