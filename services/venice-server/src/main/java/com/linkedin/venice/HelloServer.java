@@ -1,6 +1,6 @@
-package com.linkedin.venice.hadoop;
+package com.linkedin.venice;
 
-public class HelloVPJ {
+public class HelloServer {
   public static boolean isValid(String s) {
     if (s.length() > 10) {
       return true;
@@ -9,9 +9,5 @@ public class HelloVPJ {
     } else {
       return true;
     }
-  }
-
-  public static boolean booleanCheck(String[] args) {
-    return args.length > 0;
   }
 }

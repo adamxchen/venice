@@ -16,4 +16,13 @@ public class TestHelloVPJ {
     s = "dsa";
     Assert.assertTrue(HelloVPJ.isValid(s));
   }
+
+  @Test
+  public void testBooleanCheck() {
+    String[] args = { "Hello Venice Push Job" };
+    Assert.assertTrue(HelloVPJ.booleanCheck(args));
+
+    args = new String[0];
+    Assert.assertFalse(HelloVPJ.booleanCheck(args));
+  }
 }
