@@ -1,0 +1,10 @@
+flag_management:
+  default_rules: # the rules that will be followed for any flag added, generally
+    carryforward: true
+    statuses:
+      - type: project
+        target: auto
+        threshold: 100% # Allow coverage to drop by 100% since we don't use Codecov for code coverage enforcement yet.
+      - type: patch
+        target: auto
+        threshold: 100% # Ditto
