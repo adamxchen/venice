@@ -19,7 +19,6 @@ jobs:
           git remote set-head origin --auto
           git remote add upstream https://github.com/linkedin/venice
           git fetch upstream
-# Ensure the origin javadoc branch up-to-date with upstream main
           git switch -C javadoc_test
           git merge upstream/main
           git push -f origin javadoc_test
@@ -29,7 +28,7 @@ jobs:
         uses: gradle/gradle-build-action@v2
         with:
           arguments: "aggregateJavadoc"
-      - name: Deploy Javadoc to GitHub Page
+      - name: Deploy to GitHub Page
         uses: JamesIves/github-pages-deploy-action@v4.4.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
