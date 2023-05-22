@@ -19,6 +19,8 @@ jobs:
           git remote set-head origin --auto
           git remote add upstream https://github.com/linkedin/venice
           git fetch upstream
+          git config --global user.name "JavaDoc Bot"
+          git config --global user.email "javadoc_bot@invalid.com"
           git switch -C javadoc_test
           git merge upstream/main
           git push -f origin javadoc_test
