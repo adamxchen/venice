@@ -19,9 +19,10 @@ jobs:
           git remote set-head origin --auto
           git remote add upstream https://github.com/linkedin/venice
           git fetch upstream
-# Keep the local javadoc up-to-date with upstream main
+# Ensure the origin javadoc branch up-to-date with upstream main
           git switch -C javadoc_test
           git merge upstream/main
+          git push -f origin javadoc_test
       - name: Validate Gradle wrapper
         uses: gradle/wrapper-validation-action@v1
       - name: Build with Gradle
