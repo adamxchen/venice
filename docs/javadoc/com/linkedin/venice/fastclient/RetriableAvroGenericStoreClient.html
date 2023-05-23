@@ -27,7 +27,7 @@
     catch(err) {
     }
 //-->
-var data = {"i0":10,"i1":10};
+var data = {"i0":10,"i1":10,"i2":10};
 var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],8:["t4","Concrete Methods"]};
 var altColor = "altColor";
 var rowColor = "rowColor";
@@ -201,6 +201,16 @@ extends <a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.ve
 <th class="colLast" scope="col">Description</th>
 </tr>
 <tr id="i0" class="altColor">
+<td class="colFirst"><code>protected java.util.concurrent.CompletableFuture&lt;java.util.Map&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;&gt;</code></td>
+<th class="colSecond" scope="row"><code><span class="memberNameLink"><a href="#batchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">batchGet</a></span>&#8203;(<a href="BatchGetRequestContext.html" title="class in com.linkedin.venice.fastclient">BatchGetRequestContext</a>&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;&nbsp;requestContext,
+        java.util.Set&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>&gt;&nbsp;keys)</code></th>
+<td class="colLast">
+<div class="block">The logic is copied from <a href="DispatchingAvroGenericStoreClient.html#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)"><code>DispatchingAvroGenericStoreClient.streamingBatchGet(BatchGetRequestContext, Set)</code></a>
+ to reuse <a href="#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set,com.linkedin.venice.client.store.streaming.StreamingCallback)"><code>streamingBatchGet(BatchGetRequestContext, Set, StreamingCallback)</code></a>
+ to add the retry functionality to batchGet API.</div>
+</td>
+</tr>
+<tr id="i1" class="rowColor">
 <td class="colFirst"><code>protected java.util.concurrent.CompletableFuture&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;</code></td>
 <th class="colSecond" scope="row"><code><span class="memberNameLink"><a href="#get(com.linkedin.venice.fastclient.GetRequestContext,K)">get</a></span>&#8203;(<a href="GetRequestContext.html" title="class in com.linkedin.venice.fastclient">GetRequestContext</a>&nbsp;requestContext,
    <a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>&nbsp;key)</code></th>
@@ -211,7 +221,7 @@ extends <a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.ve
  is no way to control the total allowed retry per node.</div>
 </td>
 </tr>
-<tr id="i1" class="rowColor">
+<tr id="i2" class="altColor">
 <td class="colFirst"><code>void</code></td>
 <th class="colSecond" scope="row"><code><span class="memberNameLink"><a href="#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set,com.linkedin.venice.client.store.streaming.StreamingCallback)">streamingBatchGet</a></span>&#8203;(<a href="BatchGetRequestContext.html" title="class in com.linkedin.venice.fastclient">BatchGetRequestContext</a>&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;&nbsp;requestContext,
                  java.util.Set&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>&gt;&nbsp;keys,
@@ -224,14 +234,14 @@ extends <a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.ve
 <!--   -->
 </a>
 <h3>Methods inherited from class&nbsp;com.linkedin.venice.fastclient.<a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.venice.fastclient">DelegatingAvroStoreClient</a></h3>
-<code><a href="DelegatingAvroStoreClient.html#batchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">batchGet</a>, <a href="DelegatingAvroStoreClient.html#batchGet(java.util.Set)">batchGet</a>, <a href="DelegatingAvroStoreClient.html#close()">close</a>, <a href="DelegatingAvroStoreClient.html#getKeySchema()">getKeySchema</a>, <a href="DelegatingAvroStoreClient.html#getLatestValueSchema()">getLatestValueSchema</a>, <a href="DelegatingAvroStoreClient.html#getStoreName()">getStoreName</a>, <a href="DelegatingAvroStoreClient.html#start()">start</a>, <a href="DelegatingAvroStoreClient.html#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">streamingBatchGet</a></code></li>
+<code><a href="DelegatingAvroStoreClient.html#batchGetUsingSingleGet(java.util.Set)">batchGetUsingSingleGet</a>, <a href="DelegatingAvroStoreClient.html#close()">close</a>, <a href="DelegatingAvroStoreClient.html#getKeySchema()">getKeySchema</a>, <a href="DelegatingAvroStoreClient.html#getLatestValueSchema()">getLatestValueSchema</a>, <a href="DelegatingAvroStoreClient.html#getStoreName()">getStoreName</a>, <a href="DelegatingAvroStoreClient.html#start()">start</a>, <a href="DelegatingAvroStoreClient.html#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">streamingBatchGet</a></code></li>
 </ul>
 <ul class="blockList">
 <li class="blockList"><a id="methods.inherited.from.class.com.linkedin.venice.fastclient.InternalAvroStoreClient">
 <!--   -->
 </a>
 <h3>Methods inherited from class&nbsp;com.linkedin.venice.fastclient.<a href="InternalAvroStoreClient.html" title="class in com.linkedin.venice.fastclient">InternalAvroStoreClient</a></h3>
-<code><a href="InternalAvroStoreClient.html#compute()">compute</a>, <a href="InternalAvroStoreClient.html#get(K)">get</a>, <a href="InternalAvroStoreClient.html#streamingBatchGet(java.util.Set)">streamingBatchGet</a>, <a href="InternalAvroStoreClient.html#streamingBatchGet(java.util.Set,com.linkedin.venice.client.store.streaming.StreamingCallback)">streamingBatchGet</a></code></li>
+<code><a href="InternalAvroStoreClient.html#batchGet(java.util.Set)">batchGet</a>, <a href="InternalAvroStoreClient.html#compute()">compute</a>, <a href="InternalAvroStoreClient.html#get(K)">get</a>, <a href="InternalAvroStoreClient.html#streamingBatchGet(java.util.Set)">streamingBatchGet</a>, <a href="InternalAvroStoreClient.html#streamingBatchGet(java.util.Set,com.linkedin.venice.client.store.streaming.StreamingCallback)">streamingBatchGet</a></code></li>
 </ul>
 <ul class="blockList">
 <li class="blockList"><a id="methods.inherited.from.class.java.lang.Object">
@@ -303,6 +313,26 @@ extends <a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.ve
 <dl>
 <dt><span class="overrideSpecifyLabel">Overrides:</span></dt>
 <dd><code><a href="DelegatingAvroStoreClient.html#get(com.linkedin.venice.fastclient.GetRequestContext,K)">get</a></code>&nbsp;in class&nbsp;<code><a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.venice.fastclient">DelegatingAvroStoreClient</a>&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;</code></dd>
+<dt><span class="throwsLabel">Throws:</span></dt>
+<dd><code><a href="../client/exceptions/VeniceClientException.html" title="class in com.linkedin.venice.client.exceptions">VeniceClientException</a></code></dd>
+</dl>
+</li>
+</ul>
+<a id="batchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>batchGet</h4>
+<pre class="methodSignature">protected&nbsp;java.util.concurrent.CompletableFuture&lt;java.util.Map&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;&gt;&nbsp;batchGet&#8203;(<a href="BatchGetRequestContext.html" title="class in com.linkedin.venice.fastclient">BatchGetRequestContext</a>&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;&nbsp;requestContext,
+                                                                                    java.util.Set&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>&gt;&nbsp;keys)
+                                                                             throws <a href="../client/exceptions/VeniceClientException.html" title="class in com.linkedin.venice.client.exceptions">VeniceClientException</a></pre>
+<div class="block">The logic is copied from <a href="DispatchingAvroGenericStoreClient.html#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)"><code>DispatchingAvroGenericStoreClient.streamingBatchGet(BatchGetRequestContext, Set)</code></a>
+ to reuse <a href="#streamingBatchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set,com.linkedin.venice.client.store.streaming.StreamingCallback)"><code>streamingBatchGet(BatchGetRequestContext, Set, StreamingCallback)</code></a>
+ to add the retry functionality to batchGet API.</div>
+<dl>
+<dt><span class="overrideSpecifyLabel">Overrides:</span></dt>
+<dd><code><a href="DelegatingAvroStoreClient.html#batchGet(com.linkedin.venice.fastclient.BatchGetRequestContext,java.util.Set)">batchGet</a></code>&nbsp;in class&nbsp;<code><a href="DelegatingAvroStoreClient.html" title="class in com.linkedin.venice.fastclient">DelegatingAvroStoreClient</a>&lt;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">K</a>,&#8203;<a href="RetriableAvroGenericStoreClient.html" title="type parameter in RetriableAvroGenericStoreClient">V</a>&gt;</code></dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
 <dd><code><a href="../client/exceptions/VeniceClientException.html" title="class in com.linkedin.venice.client.exceptions">VeniceClientException</a></code></dd>
 </dl>
