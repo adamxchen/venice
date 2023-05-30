@@ -539,6 +539,7 @@ public class TestPushJobWithNativeReplication {
             // Verify the kafka URL being returned to the push job is the same as dc-1 kafka url.
             Assert.assertEquals(job.getKafkaUrl(), childDatacenters.get(1).getKafkaBrokerWrapper().getAddress());
           }
+          // Add something
         });
   }
 
