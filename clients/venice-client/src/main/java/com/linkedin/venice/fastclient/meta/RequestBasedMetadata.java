@@ -7,6 +7,7 @@ import com.linkedin.venice.client.store.transport.TransportClientResponse;
 import com.linkedin.venice.compression.CompressionStrategy;
 import com.linkedin.venice.compression.CompressorFactory;
 import com.linkedin.venice.compression.VeniceCompressor;
+import com.linkedin.venice.exceptions.VeniceUnsupportedOperationException;
 import com.linkedin.venice.fastclient.ClientConfig;
 import com.linkedin.venice.fastclient.stats.ClusterStats;
 import com.linkedin.venice.fastclient.stats.FastClientStats;
@@ -17,6 +18,7 @@ import com.linkedin.venice.partitioner.VenicePartitioner;
 import com.linkedin.venice.read.RequestType;
 import com.linkedin.venice.schema.SchemaData;
 import com.linkedin.venice.schema.SchemaEntry;
+import com.linkedin.venice.schema.writecompute.DerivedSchemaEntry;
 import com.linkedin.venice.serializer.FastSerializerDeserializerFactory;
 import com.linkedin.venice.serializer.RecordDeserializer;
 import com.linkedin.venice.utils.PartitionUtils;
@@ -71,6 +73,7 @@ public class RequestBasedMetadata extends AbstractStoreMetadata {
   private final ClusterStats clusterStats;
   private final FastClientStats clientStats;
   private volatile boolean isServiceDiscovered;
+  private volatile boolean isReady;
 
   public RequestBasedMetadata(ClientConfig clientConfig, D2TransportClient transportClient) {
     super(clientConfig);
@@ -266,10 +269,9 @@ public class RequestBasedMetadata extends AbstractStoreMetadata {
       if (updateCache(false)) {
         if (routingStrategy instanceof HelixScatterGatherRoutingStrategy) {
           ((HelixScatterGatherRoutingStrategy) routingStrategy).updateHelixGroupInfo(helixGroupInfo);
-        } else {
-          routingStrategy = new HelixScatterGatherRoutingStrategy(helixGroupInfo);
         }
       }
+      isReady = true;
     } catch (Exception e) {
       // Catch all errors so periodic refresh doesn't break on transient errors.
       LOGGER.error("Encountered unexpected error during periodic refresh", e);
@@ -366,6 +368,23 @@ public class RequestBasedMetadata extends AbstractStoreMetadata {
       latestValueSchemaId = schemas.get().getMaxValueSchemaId();
     }
     return latestValueSchemaId;
+  }
+
+  @Override
+  public Schema getUpdateSchema(int valueSchemaId) {
+    // Ideally, we can fetch this information from the SchemaData object, but we're not yet populating these schemas
+    throw new VeniceUnsupportedOperationException("getUpdateSchema");
+  }
+
+  @Override
+  public DerivedSchemaEntry getLatestUpdateSchema() {
+    // Ideally, we can fetch this information from the SchemaData object, but we're not yet populating these schemas
+    throw new VeniceUnsupportedOperationException("getLatestUpdateSchema");
+  }
+
+  @Override
+  public boolean isReady() {
+    return isReady;
   }
 
   /**

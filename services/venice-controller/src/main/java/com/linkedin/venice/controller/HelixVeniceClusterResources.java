@@ -137,7 +137,8 @@ public class HelixVeniceClusterResources implements VeniceResource {
       spectatorManager = getSpectatorManager(clusterName, zkClient.getServers());
     }
     this.routingDataRepository = new HelixExternalViewRepository(spectatorManager);
-    this.customizedViewRepo = new HelixCustomizedViewOfflinePushRepository(this.helixManager);
+    this.customizedViewRepo =
+        new HelixCustomizedViewOfflinePushRepository(this.helixManager, storeMetadataRepository, true);
     this.messageChannel = new HelixStatusMessageChannel(
         helixManager,
         new HelixMessageChannelStats(metricsRepository, clusterName),
@@ -164,8 +165,8 @@ public class HelixVeniceClusterResources implements VeniceResource {
         aggregateRealTimeSourceKafkaUrl,
         getActiveActiveRealTimeSourceKafkaURLs(config),
         helixAdminClient,
-        config.isErrorLeaderReplicaFailOverEnabled(),
-        config.getOffLineJobWaitTimeInMilliseconds());
+        config,
+        admin.getPushStatusStoreReader().orElse(null));
 
     this.leakedPushStatusCleanUpService = new LeakedPushStatusCleanUpService(
         clusterName,

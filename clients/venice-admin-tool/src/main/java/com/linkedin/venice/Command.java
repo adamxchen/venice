@@ -17,6 +17,7 @@ import static com.linkedin.venice.Arg.CLUSTER;
 import static com.linkedin.venice.Arg.CLUSTER_DEST;
 import static com.linkedin.venice.Arg.CLUSTER_SRC;
 import static com.linkedin.venice.Arg.COMPRESSION_STRATEGY;
+import static com.linkedin.venice.Arg.DATETIME;
 import static com.linkedin.venice.Arg.DEBUG;
 import static com.linkedin.venice.Arg.DERIVED_SCHEMA;
 import static com.linkedin.venice.Arg.DERIVED_SCHEMA_ID;
@@ -390,6 +391,9 @@ public enum Command {
       "list-store-push-info", "List information about current pushes and push history for a specific store.",
       new Arg[] { URL, CLUSTER, STORE }, new Arg[] { PARTITION_DETAIL_ENABLED }
   ),
+  GET_KAFKA_TOPIC_CONFIGS(
+      "get-kafka-topic-configs", "Get configs of a topic through controllers", new Arg[] { URL, KAFKA_TOPIC_NAME }
+  ),
   UPDATE_KAFKA_TOPIC_LOG_COMPACTION(
       "update-kafka-topic-log-compaction", "Update log compaction config of a topic through controllers",
       new Arg[] { URL, KAFKA_TOPIC_NAME, KAFKA_TOPIC_LOG_COMPACTION_ENABLED }, new Arg[] { CLUSTER }
@@ -443,7 +447,8 @@ public enum Command {
   ),
   EXECUTE_DATA_RECOVERY(
       "execute-data-recovery", "Execute data recovery for a group of stores",
-      new Arg[] { RECOVERY_COMMAND, STORES, SOURCE_FABRIC }, new Arg[] { EXTRA_COMMAND_ARGS, DEBUG, NON_INTERACTIVE }
+      new Arg[] { URL, RECOVERY_COMMAND, STORES, SOURCE_FABRIC, DEST_FABRIC, DATETIME },
+      new Arg[] { EXTRA_COMMAND_ARGS, DEBUG, NON_INTERACTIVE }
   ),
   ESTIMATE_DATA_RECOVERY_TIME(
       "estimate-data-recovery-time", "Estimates the time it would take to execute data recovery for a group of stores.",
@@ -451,7 +456,7 @@ public enum Command {
   ),
   MONITOR_DATA_RECOVERY(
       "monitor-data-recovery", "Monitor data recovery progress for a group of stores",
-      new Arg[] { URL, STORES, DEST_FABRIC }, new Arg[] { INTERVAL }
+      new Arg[] { URL, STORES, DEST_FABRIC, DATETIME }, new Arg[] { INTERVAL }
   );
 
   private final String commandName;

@@ -8,6 +8,7 @@ import static com.linkedin.venice.ConfigKeys.HEARTBEAT_CYCLE;
 import static com.linkedin.venice.ConfigKeys.HEARTBEAT_TIMEOUT;
 import static com.linkedin.venice.ConfigKeys.HELIX_HYBRID_STORE_QUOTA_ENABLED;
 import static com.linkedin.venice.ConfigKeys.KAFKA_BOOTSTRAP_SERVERS;
+import static com.linkedin.venice.ConfigKeys.KAFKA_OVER_SSL;
 import static com.linkedin.venice.ConfigKeys.KEY_VALUE_PROFILING_ENABLED;
 import static com.linkedin.venice.ConfigKeys.LISTENER_HOSTNAME;
 import static com.linkedin.venice.ConfigKeys.LISTENER_PORT;
@@ -50,6 +51,7 @@ import static com.linkedin.venice.ConfigKeys.ROUTER_HTTPAYSNCCLIENT_CONNECTION_W
 import static com.linkedin.venice.ConfigKeys.ROUTER_HTTP_CLIENT5_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.ROUTER_HTTP_CLIENT5_SKIP_CIPHER_CHECK_ENABLED;
 import static com.linkedin.venice.ConfigKeys.ROUTER_HTTP_CLIENT5_TOTAL_IO_THREAD_COUNT;
+import static com.linkedin.venice.ConfigKeys.ROUTER_HTTP_CLIENT_OPENSSL_ENABLED;
 import static com.linkedin.venice.ConfigKeys.ROUTER_HTTP_CLIENT_POOL_SIZE;
 import static com.linkedin.venice.ConfigKeys.ROUTER_IDLE_CONNECTION_TO_SERVER_CLEANUP_ENABLED;
 import static com.linkedin.venice.ConfigKeys.ROUTER_IDLE_CONNECTION_TO_SERVER_CLEANUP_THRESHOLD_MINS;
@@ -86,6 +88,7 @@ import static com.linkedin.venice.ConfigKeys.ROUTER_STORAGE_NODE_CLIENT_TYPE;
 import static com.linkedin.venice.ConfigKeys.ROUTER_THROTTLE_CLIENT_SSL_HANDSHAKES;
 import static com.linkedin.venice.ConfigKeys.ROUTER_UNHEALTHY_PENDING_CONNECTION_THRESHOLD_PER_ROUTE;
 import static com.linkedin.venice.ConfigKeys.ROUTE_DNS_CACHE_HOST_PATTERN;
+import static com.linkedin.venice.ConfigKeys.SSL_TO_KAFKA_LEGACY;
 import static com.linkedin.venice.ConfigKeys.SSL_TO_STORAGE_NODES;
 import static com.linkedin.venice.ConfigKeys.SYSTEM_SCHEMA_CLUSTER_NAME;
 import static com.linkedin.venice.ConfigKeys.UNREGISTER_METRIC_FOR_DELETED_STORE_ENABLED;
@@ -166,6 +169,7 @@ public class VeniceRouterConfig {
   private long leakedFutureCleanupPollIntervalMs;
   private long leakedFutureCleanupThresholdMs;
   private String kafkaBootstrapServers;
+  private boolean sslToKafka;
   private boolean idleConnectionToServerCleanupEnabled;
   private long idleConnectionToServerCleanupThresholdMins;
   private long fullPendingQueueServerOORMs;
@@ -208,6 +212,7 @@ public class VeniceRouterConfig {
   private int routerIOWorkerCount;
   private boolean perRouterStorageNodeThrottlerEnabled;
   private double perStoreRouterQuotaBuffer;
+  private boolean httpClientOpensslEnabled;
 
   public VeniceRouterConfig(VeniceProperties props) {
     try {
@@ -227,6 +232,7 @@ public class VeniceRouterConfig {
     sslPort = props.getInt(LISTENER_SSL_PORT);
     zkConnection = props.getString(ZOOKEEPER_ADDRESS);
     kafkaBootstrapServers = props.getString(KAFKA_BOOTSTRAP_SERVERS);
+    sslToKafka = props.getBooleanWithAlternative(KAFKA_OVER_SSL, SSL_TO_KAFKA_LEGACY, false);
     heartbeatTimeoutMs = props.getDouble(HEARTBEAT_TIMEOUT, TimeUnit.MINUTES.toMillis(1));
     heartbeatCycleMs = props.getLong(HEARTBEAT_CYCLE, TimeUnit.SECONDS.toMillis(5));
     sslToStorageNodes = props.getBoolean(SSL_TO_STORAGE_NODES, false);
@@ -385,6 +391,7 @@ public class VeniceRouterConfig {
     routerIOWorkerCount = props.getInt(ROUTER_IO_WORKER_COUNT, 24);
     perRouterStorageNodeThrottlerEnabled = props.getBoolean(ROUTER_PER_STORAGE_NODE_THROTTLER_ENABLED, true);
     perStoreRouterQuotaBuffer = props.getDouble(ROUTER_PER_STORE_ROUTER_QUOTA_BUFFER, 1.5);
+    httpClientOpensslEnabled = props.getBoolean(ROUTER_HTTP_CLIENT_OPENSSL_ENABLED, true);
   }
 
   public double getPerStoreRouterQuotaBuffer() {
@@ -585,6 +592,10 @@ public class VeniceRouterConfig {
 
   public String getKafkaBootstrapServers() {
     return kafkaBootstrapServers;
+  }
+
+  public boolean isSslToKafka() {
+    return sslToKafka;
   }
 
   public boolean isIdleConnectionToServerCleanupEnabled() {
@@ -826,5 +837,9 @@ public class VeniceRouterConfig {
 
   public boolean isPerRouterStorageNodeThrottlerEnabled() {
     return perRouterStorageNodeThrottlerEnabled;
+  }
+
+  public boolean isHttpClientOpensslEnabled() {
+    return httpClientOpensslEnabled;
   }
 }

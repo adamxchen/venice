@@ -9,6 +9,7 @@ import static com.linkedin.venice.pushmonitor.OfflinePushStatus.HELIX_ASSIGNMENT
 import static com.linkedin.venice.pushmonitor.OfflinePushStatus.HELIX_RESOURCE_NOT_CREATED;
 
 import com.linkedin.venice.controller.HelixAdminClient;
+import com.linkedin.venice.controller.VeniceControllerConfig;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.exceptions.VeniceNoStoreException;
 import com.linkedin.venice.helix.HelixCustomizedViewOfflinePushRepository;
@@ -81,6 +82,10 @@ public abstract class AbstractPushMonitor
   private final boolean disableErrorLeaderReplica;
   private final long offlineJobResourceAssignmentWaitTimeInMilliseconds;
 
+  private final PushStatusCollector pushStatusCollector;
+
+  private final boolean isOfflinePushMonitorDaVinciPushStatusEnabled;
+
   public AbstractPushMonitor(
       String clusterName,
       OfflinePushAccessor offlinePushAccessor,
@@ -93,8 +98,8 @@ public abstract class AbstractPushMonitor
       String aggregateRealTimeSourceKafkaUrl,
       List<String> activeActiveRealTimeSourceKafkaURLs,
       HelixAdminClient helixAdminClient,
-      boolean disableErrorLeaderReplica,
-      long offlineJobResourceAssignmentWaitTimeInMilliseconds) {
+      VeniceControllerConfig controllerConfig,
+      PushStatusStoreReader pushStatusStoreReader) {
     this.clusterName = clusterName;
     this.offlinePushAccessor = offlinePushAccessor;
     this.storeCleaner = storeCleaner;
@@ -106,10 +111,22 @@ public abstract class AbstractPushMonitor
     this.aggregateRealTimeSourceKafkaUrl = aggregateRealTimeSourceKafkaUrl;
     this.activeActiveRealTimeSourceKafkaURLs = activeActiveRealTimeSourceKafkaURLs;
     this.helixAdminClient = helixAdminClient;
-    this.disableErrorLeaderReplica = disableErrorLeaderReplica;
+    this.disableErrorLeaderReplica = controllerConfig.isErrorLeaderReplicaFailOverEnabled();
     this.helixClientThrottler =
         new EventThrottler(10, "push_monitor_helix_client_throttler", false, EventThrottler.BLOCK_STRATEGY);
-    this.offlineJobResourceAssignmentWaitTimeInMilliseconds = offlineJobResourceAssignmentWaitTimeInMilliseconds;
+    this.offlineJobResourceAssignmentWaitTimeInMilliseconds = controllerConfig.getOffLineJobWaitTimeInMilliseconds();
+    this.pushStatusCollector = new PushStatusCollector(
+        metadataRepository,
+        pushStatusStoreReader,
+        (topic) -> handleCompletedPush(getOfflinePush(topic)),
+        (topic, details) -> handleErrorPush(getOfflinePush(topic), details),
+        controllerConfig.isDaVinciPushStatusScanEnabled(),
+        controllerConfig.getDaVinciPushStatusScanIntervalInSeconds(),
+        controllerConfig.getDaVinciPushStatusScanThreadNumber(),
+        controllerConfig.getDaVinciPushStatusScanNoReportRetryMaxAttempt(),
+        controllerConfig.getDaVinciPushStatusScanMaxOfflineInstance());
+    this.isOfflinePushMonitorDaVinciPushStatusEnabled = controllerConfig.isDaVinciPushStatusEnabled();
+    pushStatusCollector.start();
   }
 
   @Override
@@ -123,6 +140,7 @@ public abstract class AbstractPushMonitor
   }
 
   public void loadAllPushes(List<OfflinePushStatus> offlinePushStatusList) {
+    pushStatusCollector.start();
     try (AutoCloseableLock ignore = clusterLockManager.createClusterWriteLock()) {
       LOGGER.info("Load all pushes started for cluster {}'s {}", clusterName, getClass().getSimpleName());
       // Subscribe to changes first
@@ -158,6 +176,7 @@ public abstract class AbstractPushMonitor
           if (!offlinePushStatus.getCurrentStatus().isTerminal()) {
             String topic = offlinePushStatus.getKafkaTopic();
             if (routingDataRepository.containsKafkaTopic(topic)) {
+              pushStatusCollector.subscribeTopic(topic, offlinePushStatus.getNumberOfPartition());
               Pair<ExecutionStatus, Optional<String>> status =
                   checkPushStatus(offlinePushStatus, routingDataRepository.getPartitionAssignments(topic), null);
               if (status.getFirst().isTerminal()) {
@@ -236,6 +255,7 @@ public abstract class AbstractPushMonitor
       topicToPushMap.put(kafkaTopic, pushStatus);
       offlinePushAccessor.subscribePartitionStatusChange(pushStatus, this);
       routingDataRepository.subscribeRoutingDataChange(kafkaTopic, this);
+      pushStatusCollector.subscribeTopic(kafkaTopic, numberOfPartition);
       LOGGER.info("Started monitoring push on topic:{}", kafkaTopic);
     }
   }
@@ -257,6 +277,7 @@ public abstract class AbstractPushMonitor
       } else {
         cleanupPushStatus(pushStatus, deletePushStatus);
       }
+      pushStatusCollector.unsubscribeTopic(kafkaTopic);
       LOGGER.info("Stopped monitoring push on topic: {}", kafkaTopic);
     }
   }
@@ -270,6 +291,7 @@ public abstract class AbstractPushMonitor
         stopMonitorOfflinePush(kafkaTopic, false, false);
       }
       LOGGER.info("Successfully stopped monitoring push for all topics.");
+      pushStatusCollector.clear();
     } catch (Exception e) {
       LOGGER.error("Error when stopping monitoring push for all topics", e);
     }
@@ -500,7 +522,7 @@ public abstract class AbstractPushMonitor
           String errorMsg = "After waiting for " + elapsedTimeInSec + " seconds, resource assignment for: " + topic
               + " timed out, strategy=" + strategy.toString() + ", replicationFactor=" + replicationFactor + ", reason="
               + notReadyReason.get();
-          handleErrorPush(pushStatus, errorMsg);
+          handleOfflinePushUpdate(pushStatus, ERROR, Optional.of(errorMsg));
           return new Pair<>(ExecutionStatus.ERROR, errorMsg);
         }
       } else {
@@ -618,21 +640,6 @@ public abstract class AbstractPushMonitor
       versionNums.remove(Integer.valueOf(errorVersion));
 
       cleanupPushStatus(errorPushStatus, true);
-    }
-  }
-
-  public boolean wouldJobFail(String topic, PartitionAssignment partitionAssignmentAfterRemoving) {
-    String storeName = Version.parseStoreFromKafkaTopicName(topic);
-    try (AutoCloseableLock ignore = clusterLockManager.createStoreReadLock(storeName)) {
-      if (!topicToPushMap.containsKey(topic)) {
-        // the offline push has been terminated and archived.
-        return false;
-      } else {
-        OfflinePushStatus offlinePush = getOfflinePush(topic);
-        Pair<ExecutionStatus, Optional<String>> status = PushStatusDecider.getDecider(offlinePush.getStrategy())
-            .checkPushStatusAndDetails(offlinePush, partitionAssignmentAfterRemoving);
-        return status.getFirst().equals(ExecutionStatus.ERROR);
-      }
     }
   }
 
@@ -838,7 +845,7 @@ public abstract class AbstractPushMonitor
     if (pushStatus != null && pushStatus.getCurrentStatus().equals(ExecutionStatus.STARTED)) {
       String statusDetails = "Helix resource for Topic:" + kafkaTopic + " is deleted, stopping the running push.";
       LOGGER.info(statusDetails);
-      handleErrorPush(pushStatus, statusDetails);
+      handleOfflinePushUpdate(pushStatus, ExecutionStatus.ERROR, Optional.of(statusDetails));
     }
   }
 
@@ -899,10 +906,8 @@ public abstract class AbstractPushMonitor
       OfflinePushStatus pushStatus,
       ExecutionStatus status,
       Optional<String> statusDetails) {
-    routingDataRepository.unSubscribeRoutingDataChange(pushStatus.getKafkaTopic(), this);
-
     if (status.equals(ExecutionStatus.COMPLETED)) {
-      handleCompletedPush(pushStatus);
+      pushStatusCollector.handleServerPushStatusUpdate(pushStatus.getKafkaTopic(), COMPLETED, null);
     } else if (status.equals(ExecutionStatus.ERROR)) {
       String statusDetailsString = "STATUS DETAILS ABSENT.";
       if (statusDetails.isPresent()) {
@@ -912,11 +917,12 @@ public abstract class AbstractPushMonitor
             "Status details should be provided in order to terminateOfflinePush, but they are missing.",
             new VeniceException("Exception not thrown, for stacktrace logging purposes."));
       }
-      handleErrorPush(pushStatus, statusDetailsString);
+      pushStatusCollector.handleServerPushStatusUpdate(pushStatus.getKafkaTopic(), ERROR, statusDetailsString);
     }
   }
 
   protected void handleCompletedPush(OfflinePushStatus pushStatus) {
+    routingDataRepository.unSubscribeRoutingDataChange(pushStatus.getKafkaTopic(), this);
     LOGGER.info(
         "Updating offline push status, push for: {} old status: {}, new status: {}",
         pushStatus.getKafkaTopic(),
@@ -941,7 +947,7 @@ public abstract class AbstractPushMonitor
       storeCleaner.topicCleanupWhenPushComplete(clusterName, storeName, versionNumber);
     } catch (Exception e) {
       LOGGER.warn(
-          "Couldn't perform topic cleanup when push job completed for topic: {} in cluster: ",
+          "Couldn't perform topic cleanup when push job completed for topic: {} in cluster: {}",
           topic,
           clusterName,
           e);
@@ -955,6 +961,7 @@ public abstract class AbstractPushMonitor
   }
 
   protected void handleErrorPush(OfflinePushStatus pushStatus, String statusDetails) {
+    routingDataRepository.unSubscribeRoutingDataChange(pushStatus.getKafkaTopic(), this);
     LOGGER.info(
         "Updating offline push status, push for: {} is now {}, new status: {}, statusDetails: {}",
         pushStatus.getKafkaTopic(),
@@ -1053,5 +1060,10 @@ public abstract class AbstractPushMonitor
 
   public RealTimeTopicSwitcher getRealTimeTopicSwitcher() {
     return realTimeTopicSwitcher;
+  }
+
+  @Override
+  public boolean isOfflinePushMonitorDaVinciPushStatusEnabled() {
+    return isOfflinePushMonitorDaVinciPushStatusEnabled;
   }
 }

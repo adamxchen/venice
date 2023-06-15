@@ -1,11 +1,13 @@
 package com.linkedin.venice.fastclient;
 
 import com.linkedin.d2.balancer.D2Client;
+import com.linkedin.davinci.client.DaVinciClient;
 import com.linkedin.r2.transport.common.Client;
 import com.linkedin.venice.client.exceptions.VeniceClientException;
 import com.linkedin.venice.client.store.AvroGenericStoreClient;
 import com.linkedin.venice.client.store.AvroSpecificStoreClient;
-import com.linkedin.venice.fastclient.meta.ClientRoutingStrategy;
+import com.linkedin.venice.fastclient.meta.ClientRoutingStrategyType;
+import com.linkedin.venice.fastclient.meta.StoreMetadataFetchMode;
 import com.linkedin.venice.fastclient.stats.ClusterStats;
 import com.linkedin.venice.fastclient.stats.FastClientStats;
 import com.linkedin.venice.read.RequestType;
@@ -18,9 +20,12 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import org.apache.avro.specific.SpecificRecord;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 
 public class ClientConfig<K, V, T extends SpecificRecord> {
+  private static final Logger LOGGER = LogManager.getLogger(ClientConfig.class);
   private final Client r2Client;
   private final String statsPrefix;
   private final boolean speculativeQueryEnabled;
@@ -28,7 +33,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
   private final String storeName;
   private final Map<RequestType, FastClientStats> clientStatsMap = new VeniceConcurrentHashMap<>();
   private final Executor deserializationExecutor;
-  private final ClientRoutingStrategy clientRoutingStrategy;
+  private final ClientRoutingStrategyType clientRoutingStrategyType;
   /**
    * For dual-read support.
    */
@@ -53,6 +58,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
    * But to temporarily unblock the first customer, we will only allow at most two keys in a batch-get request.
    */
   private final int maxAllowedKeyCntInBatchGetReq;
+  private final DaVinciClient<StoreMetaKey, StoreMetaValue> daVinciClientForMetaStore;
   private final AvroSpecificStoreClient<StoreMetaKey, StoreMetaValue> thinClientForMetaStore;
   private final long metadataRefreshIntervalInSeconds;
   private final boolean longTailRetryEnabledForSingleGet;
@@ -61,12 +67,17 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
   private final int longTailRetryThresholdForBatchGetInMicroSeconds;
   private final ClusterStats clusterStats;
   private final boolean isVsonStore;
-  /**
-   * For using RequestBasedMetadata instead of the ThinClientBasedMetadata based store metadata.
-   */
-  private final boolean isRequestBasedMetadata;
+  private final StoreMetadataFetchMode storeMetadataFetchMode;
   private final D2Client d2Client;
   private final String clusterDiscoveryD2Service;
+  /**
+   * The choice of implementation for batch get: single get or streamingBatchget. The first version of batchGet in
+   * FC used single get in a loop to support a customer request for two-key batch-get. This config allows switching
+   * between the two implementations. The current default is single get based batchGet, but once the streamingBatchget
+   * is validated, the default should be changed to streamingBatchget based batchGet, or probably remove the single
+   * get based batchGet support.
+   */
+  private final boolean useStreamingBatchGetAsDefault;
 
   private ClientConfig(
       String storeName,
@@ -76,7 +87,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       boolean speculativeQueryEnabled,
       Class<T> specificValueClass,
       Executor deserializationExecutor,
-      ClientRoutingStrategy clientRoutingStrategy,
+      ClientRoutingStrategyType clientRoutingStrategyType,
       boolean dualReadEnabled,
       AvroGenericStoreClient<K, V> genericThinClient,
       AvroSpecificStoreClient<K, T> specificThinClient,
@@ -86,6 +97,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       long routingUnavailableRequestCounterResetDelayMS,
       int routingPendingRequestCounterInstanceBlockThreshold,
       int maxAllowedKeyCntInBatchGetReq,
+      DaVinciClient<StoreMetaKey, StoreMetaValue> daVinciClientForMetaStore,
       AvroSpecificStoreClient<StoreMetaKey, StoreMetaValue> thinClientForMetaStore,
       long metadataRefreshIntervalInSeconds,
       boolean longTailRetryEnabledForSingleGet,
@@ -93,9 +105,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       boolean longTailRetryEnabledForBatchGet,
       int longTailRetryThresholdForBatchGetInMicroSeconds,
       boolean isVsonStore,
-      boolean isRequestBasedMetadata,
+      StoreMetadataFetchMode storeMetadataFetchMode,
       D2Client d2Client,
-      String clusterDiscoveryD2Service) {
+      String clusterDiscoveryD2Service,
+      boolean useStreamingBatchGetAsDefault) {
     if (storeName == null || storeName.isEmpty()) {
       throw new VeniceClientException("storeName param shouldn't be empty");
     }
@@ -119,7 +132,8 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     this.speculativeQueryEnabled = speculativeQueryEnabled;
     this.specificValueClass = specificValueClass;
     this.deserializationExecutor = deserializationExecutor;
-    this.clientRoutingStrategy = clientRoutingStrategy;
+    this.clientRoutingStrategyType =
+        clientRoutingStrategyType == null ? ClientRoutingStrategyType.LEAST_LOADED : clientRoutingStrategyType;
     this.dualReadEnabled = dualReadEnabled;
     this.genericThinClient = genericThinClient;
     this.specificThinClient = specificThinClient;
@@ -157,6 +171,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
 
     this.maxAllowedKeyCntInBatchGetReq = maxAllowedKeyCntInBatchGetReq;
 
+    this.daVinciClientForMetaStore = daVinciClientForMetaStore;
     this.thinClientForMetaStore = thinClientForMetaStore;
     this.metadataRefreshIntervalInSeconds = metadataRefreshIntervalInSeconds;
 
@@ -190,14 +205,24 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
 
     this.isVsonStore = isVsonStore;
 
-    this.isRequestBasedMetadata = isRequestBasedMetadata;
+    this.storeMetadataFetchMode = storeMetadataFetchMode;
     this.d2Client = d2Client;
     this.clusterDiscoveryD2Service = clusterDiscoveryD2Service;
-    if (this.isRequestBasedMetadata) {
+    if (this.storeMetadataFetchMode == StoreMetadataFetchMode.SERVER_BASED_METADATA) {
       if (this.d2Client == null || this.clusterDiscoveryD2Service == null) {
         throw new VeniceClientException(
             "Both param: d2Client and param: clusterDiscoveryD2Service must be specified when request based metadata is enabled");
       }
+    }
+    if (clientRoutingStrategyType == ClientRoutingStrategyType.HELIX_ASSISTED
+        && this.storeMetadataFetchMode != StoreMetadataFetchMode.SERVER_BASED_METADATA) {
+      throw new VeniceClientException("Helix assisted routing is only available with server based metadata enabled");
+    }
+    this.useStreamingBatchGetAsDefault = useStreamingBatchGetAsDefault;
+    if (this.useStreamingBatchGetAsDefault) {
+      LOGGER.info("Batch get will use streaming batch get implementation");
+    } else {
+      LOGGER.warn("Deprecated: Batch get will use single get implementation");
     }
   }
 
@@ -261,6 +286,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     return maxAllowedKeyCntInBatchGetReq;
   }
 
+  public DaVinciClient<StoreMetaKey, StoreMetaValue> getDaVinciClientForMetaStore() {
+    return daVinciClientForMetaStore;
+  }
+
   public AvroSpecificStoreClient<StoreMetaKey, StoreMetaValue> getThinClientForMetaStore() {
     return thinClientForMetaStore;
   }
@@ -290,16 +319,16 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     return isVsonStore;
   }
 
-  public ClientRoutingStrategy getClientRoutingStrategy() {
-    return clientRoutingStrategy;
+  public ClientRoutingStrategyType getClientRoutingStrategyType() {
+    return clientRoutingStrategyType;
   }
 
   public ClusterStats getClusterStats() {
     return this.clusterStats;
   }
 
-  public boolean isRequestBasedMetadata() {
-    return this.isRequestBasedMetadata;
+  public StoreMetadataFetchMode getStoreMetadataFetchMode() {
+    return this.storeMetadataFetchMode;
   }
 
   public D2Client getD2Client() {
@@ -310,6 +339,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     return this.clusterDiscoveryD2Service;
   }
 
+  public boolean useStreamingBatchGetAsDefault() {
+    return this.useStreamingBatchGetAsDefault;
+  }
+
   public static class ClientConfigBuilder<K, V, T extends SpecificRecord> {
     private MetricsRepository metricsRepository;
     private String statsPrefix = "";
@@ -317,7 +350,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     private Class<T> specificValueClass;
     private String storeName;
     private Executor deserializationExecutor;
-    private ClientRoutingStrategy clientRoutingStrategy;
+    private ClientRoutingStrategyType clientRoutingStrategyType;
     private Client r2Client;
     private boolean dualReadEnabled = false;
     private AvroGenericStoreClient<K, V> genericThinClient;
@@ -340,6 +373,8 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
      */
     private int maxAllowedKeyCntInBatchGetReq = 2;
 
+    private DaVinciClient<StoreMetaKey, StoreMetaValue> daVinciClientForMetaStore;
+
     private AvroSpecificStoreClient<StoreMetaKey, StoreMetaValue> thinClientForMetaStore;
 
     private long metadataRefreshIntervalInSeconds = -1;
@@ -351,9 +386,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
     private int longTailRetryThresholdForBatchGetInMicroSeconds = 10000; // 10ms.
 
     private boolean isVsonStore = false;
-    private boolean isRequestBasedMetadata = false;
+    private StoreMetadataFetchMode storeMetadataFetchMode = StoreMetadataFetchMode.DA_VINCI_CLIENT_BASED_METADATA;
     private D2Client d2Client;
     private String clusterDiscoveryD2Service;
+    private boolean useStreamingBatchGetAsDefault = false;
 
     public ClientConfigBuilder<K, V, T> setStoreName(String storeName) {
       this.storeName = storeName;
@@ -385,8 +421,9 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       return this;
     }
 
-    public ClientConfigBuilder<K, V, T> setClientRoutingStrategy(ClientRoutingStrategy clientRoutingStrategy) {
-      this.clientRoutingStrategy = clientRoutingStrategy;
+    public ClientConfigBuilder<K, V, T> setClientRoutingStrategyType(
+        ClientRoutingStrategyType clientRoutingStrategyType) {
+      this.clientRoutingStrategyType = clientRoutingStrategyType;
       return this;
     }
 
@@ -440,6 +477,12 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       return this;
     }
 
+    public ClientConfigBuilder<K, V, T> setDaVinciClientForMetaStore(
+        DaVinciClient<StoreMetaKey, StoreMetaValue> daVinciClientForMetaStore) {
+      this.daVinciClientForMetaStore = daVinciClientForMetaStore;
+      return this;
+    }
+
     public ClientConfigBuilder<K, V, T> setThinClientForMetaStore(
         AvroSpecificStoreClient<StoreMetaKey, StoreMetaValue> thinClientForMetaStore) {
       this.thinClientForMetaStore = thinClientForMetaStore;
@@ -484,8 +527,8 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       return this;
     }
 
-    public ClientConfigBuilder<K, V, T> setRequestBasedMetadata(boolean requestBasedMetadata) {
-      this.isRequestBasedMetadata = requestBasedMetadata;
+    public ClientConfigBuilder<K, V, T> setStoreMetadataFetchMode(StoreMetadataFetchMode storeMetadataFetchMode) {
+      this.storeMetadataFetchMode = storeMetadataFetchMode;
       return this;
     }
 
@@ -499,6 +542,11 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
       return this;
     }
 
+    public ClientConfigBuilder<K, V, T> setUseStreamingBatchGetAsDefault(boolean useStreamingBatchGetAsDefault) {
+      this.useStreamingBatchGetAsDefault = useStreamingBatchGetAsDefault;
+      return this;
+    }
+
     public ClientConfigBuilder<K, V, T> clone() {
       return new ClientConfigBuilder().setStoreName(storeName)
           .setR2Client(r2Client)
@@ -507,7 +555,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           .setSpeculativeQueryEnabled(speculativeQueryEnabled)
           .setSpecificValueClass(specificValueClass)
           .setDeserializationExecutor(deserializationExecutor)
-          .setClientRoutingStrategy(clientRoutingStrategy)
+          .setClientRoutingStrategyType(clientRoutingStrategyType)
           .setDualReadEnabled(dualReadEnabled)
           .setGenericThinClient(genericThinClient)
           .setSpecificThinClient(specificThinClient)
@@ -517,6 +565,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           .setRoutingUnavailableRequestCounterResetDelayMS(routingUnavailableRequestCounterResetDelayMS)
           .setRoutingPendingRequestCounterInstanceBlockThreshold(routingPendingRequestCounterInstanceBlockThreshold)
           .setMaxAllowedKeyCntInBatchGetReq(maxAllowedKeyCntInBatchGetReq)
+          .setDaVinciClientForMetaStore(daVinciClientForMetaStore)
           .setThinClientForMetaStore(thinClientForMetaStore)
           .setMetadataRefreshIntervalInSeconds(metadataRefreshIntervalInSeconds)
           .setLongTailRetryEnabledForSingleGet(longTailRetryEnabledForSingleGet)
@@ -524,9 +573,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           .setLongTailRetryEnabledForBatchGet(longTailRetryEnabledForBatchGet)
           .setLongTailRetryThresholdForBatchGetInMicroSeconds(longTailRetryThresholdForBatchGetInMicroSeconds)
           .setVsonStore(isVsonStore)
-          .setRequestBasedMetadata(isRequestBasedMetadata)
+          .setStoreMetadataFetchMode(storeMetadataFetchMode)
           .setD2Client(d2Client)
-          .setClusterDiscoveryD2Service(clusterDiscoveryD2Service);
+          .setClusterDiscoveryD2Service(clusterDiscoveryD2Service)
+          .setUseStreamingBatchGetAsDefault(useStreamingBatchGetAsDefault);
     }
 
     public ClientConfig<K, V, T> build() {
@@ -538,7 +588,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           speculativeQueryEnabled,
           specificValueClass,
           deserializationExecutor,
-          clientRoutingStrategy,
+          clientRoutingStrategyType,
           dualReadEnabled,
           genericThinClient,
           specificThinClient,
@@ -548,6 +598,7 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           routingUnavailableRequestCounterResetDelayMS,
           routingPendingRequestCounterInstanceBlockThreshold,
           maxAllowedKeyCntInBatchGetReq,
+          daVinciClientForMetaStore,
           thinClientForMetaStore,
           metadataRefreshIntervalInSeconds,
           longTailRetryEnabledForSingleGet,
@@ -555,9 +606,10 @@ public class ClientConfig<K, V, T extends SpecificRecord> {
           longTailRetryEnabledForBatchGet,
           longTailRetryThresholdForBatchGetInMicroSeconds,
           isVsonStore,
-          isRequestBasedMetadata,
+          storeMetadataFetchMode,
           d2Client,
-          clusterDiscoveryD2Service);
+          clusterDiscoveryD2Service,
+          useStreamingBatchGetAsDefault);
     }
   }
 }

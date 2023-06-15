@@ -25,10 +25,12 @@ import com.linkedin.davinci.store.AbstractStorageEngine;
 import com.linkedin.davinci.store.StoragePartitionConfig;
 import com.linkedin.davinci.store.cache.backend.ObjectCacheBackend;
 import com.linkedin.davinci.store.record.ValueRecord;
+import com.linkedin.davinci.validation.KafkaDataIntegrityValidator;
 import com.linkedin.venice.common.VeniceSystemStoreType;
 import com.linkedin.venice.common.VeniceSystemStoreUtils;
 import com.linkedin.venice.compression.CompressionStrategy;
 import com.linkedin.venice.compression.VeniceCompressor;
+import com.linkedin.venice.exceptions.MemoryLimitExhaustedException;
 import com.linkedin.venice.exceptions.PersistenceFailureException;
 import com.linkedin.venice.exceptions.UnsubscribedTopicPartitionException;
 import com.linkedin.venice.exceptions.VeniceChecksumException;
@@ -58,7 +60,6 @@ import com.linkedin.venice.kafka.protocol.enums.ControlMessageType;
 import com.linkedin.venice.kafka.protocol.enums.MessageType;
 import com.linkedin.venice.kafka.protocol.state.PartitionState;
 import com.linkedin.venice.kafka.protocol.state.StoreVersionState;
-import com.linkedin.venice.kafka.validation.KafkaDataIntegrityValidator;
 import com.linkedin.venice.kafka.validation.ProducerTracker;
 import com.linkedin.venice.message.KafkaKey;
 import com.linkedin.venice.meta.HybridStoreConfig;
@@ -170,6 +171,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   protected final AtomicBoolean emitMetrics; // TODO: remove this once we migrate to versioned stats
   protected final AtomicInteger consumerActionSequenceNumber = new AtomicInteger(0);
   protected final PriorityBlockingQueue<ConsumerAction> consumerActionsQueue;
+  protected final Map<Integer, AtomicInteger> partitionToPendingConsumerActionCountMap;
   protected final StorageMetadataService storageMetadataService;
   protected final TopicManagerRepository topicManagerRepository;
   protected final CachedKafkaMetadataGetter cachedKafkaMetadataGetter;
@@ -286,6 +288,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   private final boolean ingestionCheckpointDuringGracefulShutdownEnabled;
 
   protected boolean isDataRecovery;
+  protected int dataRecoverySourceVersionNumber;
   protected final MetaStoreWriter metaStoreWriter;
   protected final Function<String, String> kafkaClusterUrlResolver;
   /** TODO Get rid of this map once we delete the dedicated consumer mode */
@@ -297,6 +300,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   protected final boolean isChunked;
   protected final PubSubTopicRepository pubSubTopicRepository;
   private final String[] msgForLagMeasurement;
+  private final Runnable runnableForKillIngestionTasksForNonCurrentVersions;
 
   public StoreIngestionTask(
       StoreIngestionTaskFactory.Builder builder,
@@ -326,6 +330,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     this.realTimeTopic = pubSubTopicRepository.getTopic(Version.composeRealTimeTopic(storeName));
     this.versionNumber = Version.parseVersionFromKafkaTopicName(kafkaVersionTopic);
     this.consumerActionsQueue = new PriorityBlockingQueue<>(CONSUMER_ACTION_QUEUE_INIT_CAPACITY);
+    this.partitionToPendingConsumerActionCountMap = new VeniceConcurrentHashMap<>();
 
     // partitionConsumptionStateMap could be accessed by multiple threads: consumption thread and the thread handling
     // kill message
@@ -433,6 +438,8 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     for (int i = 0; i < this.msgForLagMeasurement.length; i++) {
       this.msgForLagMeasurement[i] = kafkaVersionTopic + "_" + i;
     }
+    this.runnableForKillIngestionTasksForNonCurrentVersions =
+        builder.getRunnableForKillIngestionTasksForNonCurrentVersions();
   }
 
   /** Package-private on purpose, only intended for tests. Do not use for production use cases. */
@@ -472,14 +479,16 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       Optional<LeaderFollowerStateType> leaderState) {
     throwIfNotRunning();
     statusReportAdapter.initializePartitionReportStatus(topicPartition.getPartitionNumber());
-    amplificationFactorAdapter.execute(
-        topicPartition.getPartitionNumber(),
-        subPartition -> consumerActionsQueue.add(
-            new ConsumerAction(
-                SUBSCRIBE,
-                new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
-                nextSeqNum(),
-                amplificationFactorAdapter.isLeaderSubPartition(subPartition) ? leaderState : Optional.empty())));
+    amplificationFactorAdapter.execute(topicPartition.getPartitionNumber(), subPartition -> {
+      partitionToPendingConsumerActionCountMap.computeIfAbsent(subPartition, x -> new AtomicInteger(0))
+          .incrementAndGet();
+      consumerActionsQueue.add(
+          new ConsumerAction(
+              SUBSCRIBE,
+              new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
+              nextSeqNum(),
+              amplificationFactorAdapter.isLeaderSubPartition(subPartition) ? leaderState : Optional.empty()));
+    });
   }
 
   /**
@@ -487,13 +496,15 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
    */
   public synchronized void unSubscribePartition(PubSubTopicPartition topicPartition) {
     throwIfNotRunning();
-    amplificationFactorAdapter.execute(
-        topicPartition.getPartitionNumber(),
-        subPartition -> consumerActionsQueue.add(
-            new ConsumerAction(
-                UNSUBSCRIBE,
-                new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
-                nextSeqNum())));
+    amplificationFactorAdapter.execute(topicPartition.getPartitionNumber(), subPartition -> {
+      partitionToPendingConsumerActionCountMap.computeIfAbsent(subPartition, x -> new AtomicInteger(0))
+          .incrementAndGet();
+      consumerActionsQueue.add(
+          new ConsumerAction(
+              UNSUBSCRIBE,
+              new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
+              nextSeqNum()));
+    });
   }
 
   public boolean hasAnySubscription() {
@@ -505,13 +516,15 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
    */
   public synchronized void resetPartitionConsumptionOffset(PubSubTopicPartition topicPartition) {
     throwIfNotRunning();
-    amplificationFactorAdapter.execute(
-        topicPartition.getPartitionNumber(),
-        subPartition -> consumerActionsQueue.add(
-            new ConsumerAction(
-                RESET_OFFSET,
-                new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
-                nextSeqNum())));
+    amplificationFactorAdapter.execute(topicPartition.getPartitionNumber(), subPartition -> {
+      partitionToPendingConsumerActionCountMap.computeIfAbsent(subPartition, x -> new AtomicInteger(0))
+          .incrementAndGet();
+      consumerActionsQueue.add(
+          new ConsumerAction(
+              RESET_OFFSET,
+              new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
+              nextSeqNum()));
+    });
   }
 
   public String getStoreName() {
@@ -529,6 +542,16 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
   public abstract void demoteToStandby(
       PubSubTopicPartition topicPartition,
       LeaderFollowerPartitionStateModel.LeaderSessionIdChecker checker);
+
+  public boolean hasPendingPartitionIngestionAction(int userPartition) {
+    return amplificationFactorAdapter.meetsAny(userPartition, subPartition -> {
+      AtomicInteger atomicInteger = partitionToPendingConsumerActionCountMap.get(subPartition);
+      if (atomicInteger == null) {
+        return false;
+      }
+      return atomicInteger.get() > 0;
+    });
+  }
 
   public void kill() {
     synchronized (this) {
@@ -561,6 +584,49 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         close();
       }
     }
+  }
+
+  /**
+   * This method checks if there was a previous ingestion and what its state was. If there is a mismatch
+   * between the checkpointed information and the current state, this method returns false. This implies
+   * that the process crashed during or after the ingestion but before syncing the OffsetRecord with EOP.
+   * In this case, the upstream should restart the ingestion from scratch.
+   */
+  private boolean checkDatabaseIntegrity(
+      int partitionId,
+      String topic,
+      OffsetRecord offsetRecord,
+      PartitionConsumptionState partitionConsumptionState) {
+    boolean returnStatus = true;
+    if (offsetRecord.getLocalVersionTopicOffset() > 0) {
+      StoreVersionState storeVersionState = storageEngine.getStoreVersionState();
+      if (storeVersionState != null) {
+        LOGGER.info(
+            "storeVersionState found for {}, partition: {}: checkDatabaseIntegrity will proceed",
+            topic,
+            partitionId);
+        returnStatus = storageEngine.checkDatabaseIntegrity(
+            partitionId,
+            offsetRecord.getDatabaseInfo(),
+            getStoragePartitionConfig(partitionId, storeVersionState.sorted, partitionConsumptionState));
+        LOGGER.info(
+            "checkDatabaseIntegrity {} for {}, partition: {}",
+            returnStatus ? "succeeded" : "failed",
+            topic,
+            partitionId);
+      } else {
+        LOGGER.info(
+            "storeVersionState not found for {}, partition: {}: checkDatabaseIntegrity will be skipped",
+            topic,
+            partitionId);
+      }
+    } else {
+      LOGGER.info(
+          "Local topic offset not found for {}, partition: {}: checkDatabaseIntegrity will be skipped",
+          topic,
+          partitionId);
+    }
+    return returnStatus;
   }
 
   private void beginBatchWrite(int partitionId, boolean sorted, PartitionConsumptionState partitionConsumptionState) {
@@ -1010,19 +1076,61 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
           */
         partitionIngestionExceptionList.set(exceptionPartition, null);
       } else {
-        if (!partitionConsumptionState.isCompletionReported()) {
-          reportError(partitionException.getMessage(), exceptionPartition, partitionException);
+        PubSubTopicPartition pubSubTopicPartition = new PubSubTopicPartitionImpl(versionTopic, exceptionPartition);
+        /**
+         * Special handling for current version when encountering {@link MemoryLimitExhaustedException}.
+         */
+        if (partitionException instanceof MemoryLimitExhaustedException
+            || partitionException.getCause() instanceof MemoryLimitExhaustedException
+                && isCurrentVersion.getAsBoolean()) {
+          LOGGER.warn(
+              "Encountered MemoryLimitExhaustedException, and ingestion task will try to reopen the database and"
+                  + " resume the consumption after killing ingestion tasks for non current versions");
+          /**
+           * Pause topic consumption to avoid more damage.
+           * We can't unsubscribe it since in some scenario, all the partitions can be unsubscribed, and the ingestion task
+           * will end. Even later on, there are avaiable memory space, we can't resume the ingestion task.
+           */
+          pauseConsumption(pubSubTopicPartition.getPubSubTopic().getName(), pubSubTopicPartition.getPartitionNumber());
+          LOGGER.info(
+              "Pausing consumption of topic: {}, partition: {} because of hitting memory limit",
+              pubSubTopicPartition.getPubSubTopic().getName(),
+              pubSubTopicPartition.getPartitionNumber());
+          runnableForKillIngestionTasksForNonCurrentVersions.run();
+          if (storageEngine.hasMemorySpaceLeft()) {
+            unSubscribePartition(pubSubTopicPartition);
+            /**
+             * DaVinci ingestion hits memory limit and we would like to retry it in the following way:
+             * 1. Kill the ingestion tasks for non-current versions.
+             * 2. Reopen the database since the current database in a bad state, where it can't write or sync even
+             *    there are rooms (bug in SSTFileManager implementation in RocksDB). Reopen will drop the not-yet-synced
+             *    memtable unfortunately.
+             * 3. Resubscribe the affected partition.
+             */
+            LOGGER.info(
+                "Ingestion for topic: {}, partition: {} can resume since there are more space reclaimed",
+                kafkaVersionTopic,
+                exceptionPartition);
+            storageEngine.reopenStoragePartition(exceptionPartition);
+            // DaVinci is always a follower.
+            subscribePartition(pubSubTopicPartition, Optional.empty());
+          }
         } else {
-          LOGGER.error(
-              "Ignoring exception for partition {} for store version {} since this partition is already online. "
-                  + "Please engage Venice DEV team immediately.",
-              exceptionPartition,
-              kafkaVersionTopic,
-              partitionException);
-        }
-        // Unsubscribe the partition to avoid more damages.
-        if (partitionConsumptionStateMap.containsKey(exceptionPartition)) {
-          unSubscribePartition(new PubSubTopicPartitionImpl(versionTopic, exceptionPartition));
+          if (!partitionConsumptionState.isCompletionReported()) {
+            reportError(partitionException.getMessage(), exceptionPartition, partitionException);
+
+          } else {
+            LOGGER.error(
+                "Ignoring exception for partition {} for store version {} since this partition is already online. "
+                    + "Please engage Venice DEV team immediately.",
+                exceptionPartition,
+                kafkaVersionTopic,
+                partitionException);
+          }
+          // Unsubscribe the partition to avoid more damages.
+          if (partitionConsumptionStateMap.containsKey(exceptionPartition)) {
+            unSubscribePartition(new PubSubTopicPartitionImpl(versionTopic, exceptionPartition));
+          }
         }
       }
     });
@@ -1334,7 +1442,9 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         action.incrementAttempt();
         processConsumerAction(action, store);
         // Remove the action that is processed recently (not necessarily the head of consumerActionsQueue).
-        consumerActionsQueue.remove(action);
+        if (consumerActionsQueue.remove(action)) {
+          partitionToPendingConsumerActionCountMap.get(action.getPartition()).decrementAndGet();
+        }
         LOGGER.info("Finished consumer action {}", action);
       } catch (VeniceIngestionTaskKilledException | InterruptedException e) {
         throw e;
@@ -1348,7 +1458,9 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         PartitionConsumptionState state = partitionConsumptionStateMap.get(action.getPartition());
 
         // Remove the action that is failed to execute recently (not necessarily the head of consumerActionsQueue).
-        consumerActionsQueue.remove(action);
+        if (consumerActionsQueue.remove(action)) {
+          partitionToPendingConsumerActionCountMap.get(action.getPartition()).decrementAndGet();
+        }
         if (state != null && !state.isCompletionReported()) {
           reportError(
               "Error when processing consumer action: " + action,
@@ -1492,6 +1604,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       PubSubTopicPartition topicPartition,
       LeaderFollowerStateType leaderState) throws InterruptedException {
     int partition = topicPartition.getPartitionNumber();
+    String topic = topicPartition.getPubSubTopic().getName();
     switch (operation) {
       case SUBSCRIBE:
         // Clear the error partition tracking
@@ -1499,10 +1612,11 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         // Drain the buffered message by last subscription.
         storeBufferService.drainBufferedRecordsFromTopicPartition(topicPartition);
         subscribedCount++;
-        OffsetRecord offsetRecord =
-            storageMetadataService.getLastOffset(topicPartition.getPubSubTopic().getName(), partition);
 
-        // First let's try to restore the state retrieved from the OffsetManager
+        // Get the last persisted Offset record from metadata service
+        OffsetRecord offsetRecord = storageMetadataService.getLastOffset(topic, partition);
+
+        // Let's try to restore the state retrieved from the OffsetManager
         PartitionConsumptionState newPartitionConsumptionState =
             new PartitionConsumptionState(partition, amplificationFactor, offsetRecord, hybridStoreConfig.isPresent());
         newPartitionConsumptionState.setLeaderFollowerState(leaderState);
@@ -1515,6 +1629,17 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
         });
 
         long consumptionStatePrepTimeStart = System.currentTimeMillis();
+        if (!checkDatabaseIntegrity(partition, topic, offsetRecord, newPartitionConsumptionState)) {
+          LOGGER.warn(
+              "Restart ingestion from the beginning by resetting OffsetRecord for topic: {} and partition: {}",
+              topic,
+              partition);
+          resetOffset(partition, topicPartition, true);
+          newPartitionConsumptionState = partitionConsumptionStateMap.get(partition);
+          newPartitionConsumptionState.setLeaderFollowerState(leaderState);
+          offsetRecord = newPartitionConsumptionState.getOffsetRecord();
+        }
+
         checkConsumptionStateWhenStart(offsetRecord, newPartitionConsumptionState);
         reportIfCatchUpVersionTopicOffset(newPartitionConsumptionState);
         versionedIngestionStats.recordSubscribePrepLatency(
@@ -1602,59 +1727,62 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
 
         break;
       case RESET_OFFSET:
-        /*
-         * After auditing all the calls that can result in the RESET_OFFSET action, it turns out we always unsubscribe
-         * from the topic/partition before resetting offset, which is unnecessary; but we decided to keep this action
-         * for now in case that in future, we do want to reset the consumer without unsubscription.
-         */
-        PartitionConsumptionState partitionConsumptionState = partitionConsumptionStateMap.get(partition);
-        if (partitionConsumptionState != null
-            && consumerHasSubscription(topicPartition.getPubSubTopic(), partitionConsumptionState)) {
-          LOGGER.error(
-              "This shouldn't happen since unsubscription should happen before reset offset for: {}",
-              topicPartition);
-          /*
-           * Only update the consumer and partitionConsumptionStateMap when consumer actually has
-           * subscription to this topic/partition; otherwise, we would blindly update the StateMap
-           * and mess up other operations on the StateMap.
-           */
-          try {
-            consumerResetOffset(topicPartition.getPubSubTopic(), partitionConsumptionState);
-            LOGGER.info("{} Reset OffSet : {}", consumerTaskId, topicPartition);
-          } catch (UnsubscribedTopicPartitionException e) {
-            LOGGER.error(
-                "{} Kafka consumer should have subscribed to the partition already but it fails "
-                    + "on resetting offset for: {}",
-                consumerTaskId,
-                topicPartition);
-          }
-          partitionConsumptionStateMap.put(
-              partition,
-              new PartitionConsumptionState(
-                  partition,
-                  amplificationFactor,
-                  new OffsetRecord(partitionStateSerializer),
-                  hybridStoreConfig.isPresent()));
-          storageUtilizationManager.initPartition(partition);
-          // Reset the error partition tracking
-          partitionIngestionExceptionList.set(partition, null);
-        } else {
-          LOGGER.info(
-              "{} No need to reset offset by Kafka consumer, since the consumer is not " + "subscribing: {}",
-              consumerTaskId,
-              topicPartition);
-        }
-        kafkaDataIntegrityValidator.clearPartition(partition);
-        storageMetadataService.clearOffset(topicPartition.getPubSubTopic().getName(), partition);
+        resetOffset(partition, topicPartition, false);
         break;
       case KILL:
-        LOGGER.info("Kill this consumer task for Topic: {}", topicPartition.getPubSubTopic().getName());
+        LOGGER.info("Kill this consumer task for Topic: {}", topic);
         // Throw the exception here to break the consumption loop, and then this task is marked as error status.
-        throw new VeniceIngestionTaskKilledException(
-            "Received the signal to kill this consumer. Topic " + topicPartition.getPubSubTopic().getName());
+        throw new VeniceIngestionTaskKilledException("Received the signal to kill this consumer. Topic " + topic);
       default:
         throw new UnsupportedOperationException(operation.name() + " is not supported in " + getClass().getName());
     }
+  }
+
+  private void resetOffset(int partition, PubSubTopicPartition topicPartition, boolean restartIngestion) {
+    PartitionConsumptionState partitionConsumptionState = partitionConsumptionStateMap.get(partition);
+
+    if (partitionConsumptionState != null
+        && (restartIngestion || consumerHasSubscription(topicPartition.getPubSubTopic(), partitionConsumptionState))) {
+      if (restartIngestion) {
+        LOGGER.info("Reset offset to restart ingestion for: {}", topicPartition);
+      } else {
+        LOGGER.error(
+            "This shouldn't happen since unsubscription should happen before reset offset for: {}",
+            topicPartition);
+      }
+      /*
+       * Only update the consumer and partitionConsumptionStateMap when consumer actually has
+       * subscription to this topic/partition; otherwise, we would blindly update the StateMap
+       * and mess up other operations on the StateMap.
+       */
+      try {
+        consumerResetOffset(topicPartition.getPubSubTopic(), partitionConsumptionState);
+        LOGGER.info("{} Reset OffSet : {}", consumerTaskId, topicPartition);
+      } catch (UnsubscribedTopicPartitionException e) {
+        LOGGER.error(
+            "{} Kafka consumer should have subscribed to the partition already but it fails "
+                + "on resetting offset for: {}",
+            consumerTaskId,
+            topicPartition);
+      }
+      partitionConsumptionStateMap.put(
+          partition,
+          new PartitionConsumptionState(
+              partition,
+              amplificationFactor,
+              new OffsetRecord(partitionStateSerializer),
+              hybridStoreConfig.isPresent()));
+      storageUtilizationManager.initPartition(partition);
+      // Reset the error partition tracking
+      partitionIngestionExceptionList.set(partition, null);
+    } else {
+      LOGGER.info(
+          "{} No need to reset offset by Kafka consumer, since the consumer is not subscribing: {}",
+          consumerTaskId,
+          topicPartition);
+    }
+    kafkaDataIntegrityValidator.clearPartition(partition);
+    storageMetadataService.clearOffset(topicPartition.getPubSubTopic().getName(), partition);
   }
 
   /**
@@ -2037,7 +2165,14 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       return;
     }
     // Flush data partition
-    Map<String, String> dbCheckpointingInfo = storageEngineReloadedFromRepo.sync(partition);
+    final AtomicReference<Map<String, String>> dbCheckpointingInfoReference = new AtomicReference<>();
+    executeStorageEngineRunnable(partition, () -> {
+      Map<String, String> dbCheckpointingInfoFinal = storageEngineReloadedFromRepo.sync(partition);
+      dbCheckpointingInfoReference.set(dbCheckpointingInfoFinal);
+    });
+    if (dbCheckpointingInfoReference.get() == null) {
+      throw new VeniceException("The ingestion task has already stopped");
+    }
     storageUtilizationManager.notifyFlushToDisk(pcs);
 
     // Update the partition key in metadata partition
@@ -2047,7 +2182,7 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     }
     OffsetRecord offsetRecord = pcs.getOffsetRecord();
     // Check-pointing info required by the underlying storage engine
-    offsetRecord.setDatabaseInfo(dbCheckpointingInfo);
+    offsetRecord.setDatabaseInfo(dbCheckpointingInfoReference.get());
     storageMetadataService.put(this.kafkaVersionTopic, partition, offsetRecord);
     pcs.resetProcessedRecordSizeSinceLastSync();
     String msg = "Offset synced for partition " + partition + " of topic " + topic + ": ";
@@ -2451,6 +2586,24 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
             partitionConsumptionState,
             leaderProducedRecordContext,
             currentTimeMs);
+        if (!isUserSystemStore() && isHybridMode() && partitionConsumptionState.hasLagCaughtUp()) {
+          long afterProcessingRecordTimestampMs = System.currentTimeMillis();
+          long brokerProducedTimeStamp = (leaderProducedRecordContext == null)
+              ? kafkaValue.producerMetadata.messageTimestamp
+              : leaderProducedRecordContext.getProducedTimestampMs();
+          /** This metric is used in combination with the nearlineProducerToLocalBrokerLatency metric to measure the
+           * end to end latency of a record from the time it is produced to the time it is ready to serve. If we add
+           * them together we get the approx end to end latency of a message. Though the time taken to receive broker
+           * acknowledgement will be double counted for followers. This is estimated to be very small (1%)
+           * TODO: We plan to upgrade the KME to include the producer timestamp after the KME prrotocol upgrade
+           * enhancements and that will give us more accurate E2E latency.
+           */
+          versionedIngestionStats.recordNearlineLocalBrokerToReadyToServeLatency(
+              storeName,
+              versionNumber,
+              afterProcessingRecordTimestampMs - brokerProducedTimeStamp,
+              afterProcessingRecordTimestampMs);
+        }
       }
       versionedIngestionStats.recordConsumedRecordEndToEndProcessingLatency(
           storeName,
@@ -2619,10 +2772,12 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       int backupBytes = putValue.getInt();
       putValue.position(putValue.position() - ValueRecord.SCHEMA_HEADER_LENGTH);
       ByteUtils.writeInt(putValue.array(), put.schemaId, putValue.position());
-      writeToStorageEngine(partition, keyBytes, put, currentTimeMs);
-
-      /* We still want to recover the original position to make this function idempotent. */
-      putValue.putInt(backupBytes);
+      try {
+        writeToStorageEngine(partition, keyBytes, put, currentTimeMs);
+      } finally {
+        /* We still want to recover the original position to make this function idempotent. */
+        putValue.putInt(backupBytes);
+      }
     }
   }
 
@@ -2649,26 +2804,26 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
     }
   }
 
+  private void executeStorageEngineRunnable(int partition, Runnable storageEngineRunnable) {
+    try {
+      storageEngineRunnable.run();
+    } catch (VeniceException e) {
+      throwOrLogStorageFailureDependingIfStillSubscribed(partition, e);
+    }
+  }
+
   /**
    * Persist Put record to storage engine.
    */
   protected void putInStorageEngine(int partition, byte[] keyBytes, Put put) {
-    try {
-      storageEngine.put(partition, keyBytes, put.putValue);
-    } catch (PersistenceFailureException e) {
-      throwOrLogStorageFailureDependingIfStillSubscribed(partition, e);
-    }
+    executeStorageEngineRunnable(partition, () -> storageEngine.put(partition, keyBytes, put.putValue));
   }
 
   protected void removeFromStorageEngine(int partition, byte[] keyBytes, Delete delete) {
-    try {
-      storageEngine.delete(partition, keyBytes);
-    } catch (PersistenceFailureException e) {
-      throwOrLogStorageFailureDependingIfStillSubscribed(partition, e);
-    }
+    executeStorageEngineRunnable(partition, () -> storageEngine.delete(partition, keyBytes));
   }
 
-  protected void throwOrLogStorageFailureDependingIfStillSubscribed(int partition, PersistenceFailureException e) {
+  protected void throwOrLogStorageFailureDependingIfStillSubscribed(int partition, VeniceException e) {
     if (partitionConsumptionStateMap.containsKey(partition)) {
       throw new VeniceException(
           "Caught an exception while trying to interact with the storage engine for partition " + partition
@@ -2933,7 +3088,6 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
       elapsedTime = System.currentTimeMillis() - startTime;
 
       if (state != null) {
-        LOGGER.info("Version state is available for {} after {} ms", kafkaTopic, elapsedTime);
         return state;
       }
 
@@ -3380,6 +3534,20 @@ public abstract class StoreIngestionTask implements Runnable, Closeable {
 
   protected String getKafkaVersionTopic() {
     return kafkaVersionTopic;
+  }
+
+  public boolean isStuckByMemoryConstraint() {
+    for (PartitionExceptionInfo ex: partitionIngestionExceptionList) {
+      if (ex == null) {
+        continue;
+      }
+      Exception partitionIngestionException = ex.getException();
+      if (partitionIngestionException instanceof MemoryLimitExhaustedException
+          || partitionIngestionException.getCause() instanceof MemoryLimitExhaustedException) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

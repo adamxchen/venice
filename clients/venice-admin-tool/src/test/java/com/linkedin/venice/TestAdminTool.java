@@ -10,6 +10,7 @@ import com.linkedin.venice.controllerapi.MultiReplicaResponse;
 import com.linkedin.venice.controllerapi.StoreResponse;
 import com.linkedin.venice.controllerapi.UpdateClusterConfigQueryParams;
 import com.linkedin.venice.controllerapi.UpdateStoreQueryParams;
+import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.meta.StoreInfo;
 import com.linkedin.venice.meta.Version;
 import com.linkedin.venice.meta.VersionImpl;
@@ -135,5 +136,32 @@ public class TestAdminTool {
       storeInfo.setVersions(Collections.emptyList());
     }
     return storeInfo;
+  }
+
+  @Test
+  public void testGetPubSubTopicConfigsRequiresValidTopicName() {
+    String badTopicName = "badTopicName_v_rt_0";
+    String[] args =
+        { "--get-kafka-topic-configs", "--url", "http://localhost:7036", "--kafka-topic-name", badTopicName };
+    Assert.assertThrows(VeniceException.class, () -> AdminTool.main(args));
+  }
+
+  @Test
+  public void testAdminTopicIsAllowedByTopicConfigsRelatedApi() {
+    String topicName = "venice_admin_testCluster";
+    String[] args = { "--update-kafka-topic-retention", "--url", "http://localhost:7036", "--kafka-topic-name",
+        topicName, "--kafka-topic-retention-in-ms", "1000" };
+    try {
+      AdminTool.main(args);
+    } catch (Exception e) {
+      Assert.fail("AdminTool should allow admin topic to be updated by config update API", e);
+    }
+
+    String[] args2 = { "--get-kafka-topic-configs", "--url", "http://localhost:7036", "--kafka-topic-name", topicName };
+    try {
+      AdminTool.main(args2);
+    } catch (Exception e) {
+      Assert.fail("AdminTool should allow admin topic to be queried by config query API", e);
+    }
   }
 }

@@ -20,6 +20,7 @@ import com.linkedin.davinci.store.AbstractStorageEngine;
 import com.linkedin.davinci.store.cache.backend.ObjectCacheBackend;
 import com.linkedin.davinci.store.record.ValueRecord;
 import com.linkedin.davinci.store.view.VeniceViewWriter;
+import com.linkedin.davinci.validation.KafkaDataIntegrityValidator;
 import com.linkedin.venice.common.VeniceSystemStoreUtils;
 import com.linkedin.venice.compression.CompressionStrategy;
 import com.linkedin.venice.exceptions.VeniceException;
@@ -37,7 +38,6 @@ import com.linkedin.venice.kafka.protocol.Update;
 import com.linkedin.venice.kafka.protocol.enums.ControlMessageType;
 import com.linkedin.venice.kafka.protocol.enums.MessageType;
 import com.linkedin.venice.kafka.protocol.state.StoreVersionState;
-import com.linkedin.venice.kafka.validation.KafkaDataIntegrityValidator;
 import com.linkedin.venice.message.KafkaKey;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
@@ -77,6 +77,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
@@ -207,6 +208,7 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
                 + version.getDataRecoveryVersionConfig().getDataRecoverySourceFabric());
       }
       isDataRecovery = true;
+      dataRecoverySourceVersionNumber = version.getDataRecoveryVersionConfig().getDataRecoverySourceVersionNumber();
       if (isHybridMode()) {
         dataRecoveryCompletionTimeLagThresholdInMs = TopicManager.BUFFER_REPLAY_MINIMAL_SAFETY_MARGIN / 2;
         LOGGER.info(
@@ -280,14 +282,16 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       PubSubTopicPartition topicPartition,
       LeaderFollowerPartitionStateModel.LeaderSessionIdChecker checker) {
     throwIfNotRunning();
-    amplificationFactorAdapter.execute(
-        topicPartition.getPartitionNumber(),
-        subPartition -> consumerActionsQueue.add(
-            new ConsumerAction(
-                STANDBY_TO_LEADER,
-                new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
-                nextSeqNum(),
-                checker)));
+    amplificationFactorAdapter.execute(topicPartition.getPartitionNumber(), subPartition -> {
+      partitionToPendingConsumerActionCountMap.computeIfAbsent(subPartition, x -> new AtomicInteger(0))
+          .incrementAndGet();
+      consumerActionsQueue.add(
+          new ConsumerAction(
+              STANDBY_TO_LEADER,
+              new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
+              nextSeqNum(),
+              checker));
+    });
   }
 
   @Override
@@ -295,14 +299,16 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
       PubSubTopicPartition topicPartition,
       LeaderFollowerPartitionStateModel.LeaderSessionIdChecker checker) {
     throwIfNotRunning();
-    amplificationFactorAdapter.execute(
-        topicPartition.getPartitionNumber(),
-        subPartition -> consumerActionsQueue.add(
-            new ConsumerAction(
-                LEADER_TO_STANDBY,
-                new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
-                nextSeqNum(),
-                checker)));
+    amplificationFactorAdapter.execute(topicPartition.getPartitionNumber(), subPartition -> {
+      partitionToPendingConsumerActionCountMap.computeIfAbsent(subPartition, x -> new AtomicInteger(0))
+          .incrementAndGet();
+      consumerActionsQueue.add(
+          new ConsumerAction(
+              LEADER_TO_STANDBY,
+              new PubSubTopicPartitionImpl(topicPartition.getPubSubTopic(), subPartition),
+              nextSeqNum(),
+              checker));
+    });
   }
 
   @Override
@@ -560,6 +566,10 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
                 consumerTaskId,
                 currentLeaderTopic,
                 partition);
+            if (isDataRecovery && partitionConsumptionState.isBatchOnly() && !versionTopic.equals(currentLeaderTopic)) {
+              partitionConsumptionState.getOffsetRecord().setLeaderTopic(versionTopic);
+              currentLeaderTopic = versionTopic;
+            }
             /**
              * The flag is turned on in {@link LeaderFollowerStoreIngestionTask#shouldProcessRecord} avoid consuming
              * unwanted messages after EOP in remote VT, such as SOBR. Now that the leader switches to consume locally,
@@ -729,6 +739,11 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     }
 
     partitionConsumptionState.setLeaderFollowerState(LEADER);
+    if (isDataRecovery && partitionConsumptionState.isBatchOnly() && partitionConsumptionState.consumeRemotely()) {
+      // Batch-only store data recovery might consume from a previous version in remote colo.
+      String dataRecoveryVersionTopic = Version.composeKafkaTopic(storeName, dataRecoverySourceVersionNumber);
+      offsetRecord.setLeaderTopic(pubSubTopicRepository.getTopic(dataRecoveryVersionTopic));
+    }
     final PubSubTopic leaderTopic = offsetRecord.getLeaderTopic(pubSubTopicRepository);
     final PubSubTopicPartition leaderTopicPartition = partitionConsumptionState.getSourceTopicPartition(leaderTopic);
     final long leaderStartOffset = partitionConsumptionState
@@ -2536,6 +2551,11 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
     if (isLeader(partitionConsumptionState)) {
       return;
     }
+    OffsetRecord offsetRecord = partitionConsumptionState.getOffsetRecord();
+    PubSubTopic leaderTopic = offsetRecord.getLeaderTopic(pubSubTopicRepository);
+    if (isDataRecovery && partitionConsumptionState.isBatchOnly() && !versionTopic.equals(leaderTopic)) {
+      partitionConsumptionState.getOffsetRecord().setLeaderTopic(versionTopic);
+    }
     /**
      * When the node works as a leader, it does not update leader topic when processing TS. When the node demotes to
      * follower after leadership handover or becomes follower after restart, it should track the topic that leader will
@@ -2544,9 +2564,8 @@ public class LeaderFollowerStoreIngestionTask extends StoreIngestionTask {
      * VT at RT offset.
      */
     TopicSwitchWrapper topicSwitch = partitionConsumptionState.getTopicSwitch();
-    OffsetRecord offsetRecord = partitionConsumptionState.getOffsetRecord();
     if (topicSwitch != null) {
-      if (!topicSwitch.getNewSourceTopic().equals(offsetRecord.getLeaderTopic(pubSubTopicRepository))) {
+      if (!topicSwitch.getNewSourceTopic().equals(leaderTopic)) {
         offsetRecord.setLeaderTopic(topicSwitch.getNewSourceTopic());
       }
     }

@@ -17,6 +17,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.linkedin.venice.controller.VeniceControllerConfig;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.helix.HelixCustomizedViewOfflinePushRepository;
 import com.linkedin.venice.helix.HelixState;
@@ -44,6 +45,7 @@ import com.linkedin.venice.utils.locks.AutoCloseableLock;
 import com.linkedin.venice.utils.locks.ClusterLockManager;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +67,8 @@ public abstract class AbstractPushMonitorTest {
   protected StoreCleaner mockStoreCleaner;
   private AggPushHealthStats mockPushHealthStats;
   protected ClusterLockManager clusterLockManager;
+
+  protected VeniceControllerConfig mockControllerConfig;
 
   private final static String clusterName = Utils.getUniqueString("test_cluster");
   private final static String aggregateRealTimeSourceKafkaUrl = "aggregate-real-time-source-kafka-url";
@@ -93,6 +97,12 @@ public abstract class AbstractPushMonitorTest {
     mockRoutingDataRepo = mock(RoutingDataRepository.class);
     mockPushHealthStats = mock(AggPushHealthStats.class);
     clusterLockManager = new ClusterLockManager(clusterName);
+    mockControllerConfig = mock(VeniceControllerConfig.class);
+    when(mockControllerConfig.isErrorLeaderReplicaFailOverEnabled()).thenReturn(true);
+    when(mockControllerConfig.isDaVinciPushStatusEnabled()).thenReturn(true);
+    when(mockControllerConfig.getDaVinciPushStatusScanIntervalInSeconds()).thenReturn(5);
+    when(mockControllerConfig.getOffLineJobWaitTimeInMilliseconds()).thenReturn(120000L);
+    when(mockControllerConfig.getDaVinciPushStatusScanThreadNumber()).thenReturn(4);
     monitor = getPushMonitor();
   }
 
@@ -823,11 +833,12 @@ public abstract class AbstractPushMonitorTest {
       final String topic = "test-lock_v1";
       final String instanceId = "test_instance";
       prepareMockStore(topic);
-      Map<String, List<Instance>> onlineInstanceMap = new HashMap<>();
-      onlineInstanceMap.put(HelixState.ONLINE_STATE, Collections.singletonList(new Instance(instanceId, "a", 1)));
+      EnumMap<HelixState, List<Instance>> helixStateToInstancesMap = new EnumMap<>(HelixState.class);
+      helixStateToInstancesMap.put(HelixState.LEADER, Collections.singletonList(new Instance(instanceId, "a", 1)));
       // Craft a PartitionAssignment that will trigger the StoreCleaner methods as part of handleCompletedPush.
       PartitionAssignment completedPartitionAssignment = new PartitionAssignment(topic, 1);
-      completedPartitionAssignment.addPartition(new Partition(0, onlineInstanceMap));
+      completedPartitionAssignment
+          .addPartition(new Partition(0, helixStateToInstancesMap, new EnumMap<>(ExecutionStatus.class)));
       ReplicaStatus status = new ReplicaStatus(instanceId);
       status.updateStatus(ExecutionStatus.COMPLETED);
       ReadOnlyPartitionStatus completedPartitionStatus =
@@ -870,10 +881,11 @@ public abstract class AbstractPushMonitorTest {
       final String instanceId = "test_instance";
 
       prepareMockStore(topic);
-      Map<String, List<Instance>> onlineInstanceMap = new HashMap<>();
-      onlineInstanceMap.put(HelixState.ONLINE_STATE, Collections.singletonList(new Instance(instanceId, "a", 1)));
+      EnumMap<HelixState, List<Instance>> helixStateToInstancesMap = new EnumMap<>(HelixState.class);
+      helixStateToInstancesMap.put(HelixState.LEADER, Collections.singletonList(new Instance(instanceId, "a", 1)));
       PartitionAssignment completedPartitionAssignment = new PartitionAssignment(topic, 1);
-      completedPartitionAssignment.addPartition(new Partition(0, onlineInstanceMap));
+      completedPartitionAssignment
+          .addPartition(new Partition(0, helixStateToInstancesMap, new EnumMap<>(ExecutionStatus.class)));
       doReturn(true).when(mockRoutingDataRepo).containsKafkaTopic(topic);
       doReturn(completedPartitionAssignment).when(mockRoutingDataRepo).getPartitionAssignments(topic);
 
@@ -937,6 +949,10 @@ public abstract class AbstractPushMonitorTest {
 
   protected ReadWriteStoreRepository getMockStoreRepo() {
     return mockStoreRepo;
+  }
+
+  protected VeniceControllerConfig getMockControllerConfig() {
+    return mockControllerConfig;
   }
 
   protected RoutingDataRepository getMockRoutingDataRepo() {

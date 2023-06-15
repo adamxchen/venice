@@ -7,6 +7,7 @@ import com.linkedin.venice.exceptions.ConfigurationException;
 import com.linkedin.venice.exceptions.ErrorType;
 import com.linkedin.venice.exceptions.VeniceException;
 import com.linkedin.venice.exceptions.VeniceHttpException;
+import com.linkedin.venice.helix.HelixState;
 import com.linkedin.venice.helix.Replica;
 import com.linkedin.venice.helix.ResourceAssignment;
 import com.linkedin.venice.meta.Instance;
@@ -16,11 +17,9 @@ import com.linkedin.venice.meta.ReadOnlyStoreRepository;
 import com.linkedin.venice.meta.RoutingDataRepository;
 import com.linkedin.venice.meta.Store;
 import com.linkedin.venice.meta.Version;
-import com.linkedin.venice.pubsub.api.PubSubTopicType;
 import com.linkedin.venice.pushmonitor.ExecutionStatus;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
 import com.linkedin.venice.serialization.avro.InternalAvroSpecificSerializer;
-import com.linkedin.venice.views.ChangeCaptureView;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
@@ -28,7 +27,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
-import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -140,7 +138,7 @@ public class Utils {
     boolean fileExists = propsFile.exists();
     if (!fileExists) {
       if (isFileOptional) {
-        return new VeniceProperties(new Properties());
+        return VeniceProperties.empty();
       } else {
         String fullFilePath = Utils.getCanonicalPath(propsFilePath);
         throw new ConfigurationException(fullFilePath + " does not exist.");
@@ -319,7 +317,9 @@ public class Utils {
   public static Map<String, String> parseCommaSeparatedStringMapFromString(String value, String fieldName) {
     try {
       Map<String, String> map = new HashMap<>();
-      Arrays.stream(value.split(",")).map(s -> s.split("=")).forEach(strings -> map.put(strings[0], strings[1]));
+      if (!value.isEmpty()) {
+        Arrays.stream(value.split(",")).map(s -> s.split("=")).forEach(strings -> map.put(strings[0], strings[1]));
+      }
       return map;
     } catch (Exception e) {
       throw new VeniceException(fieldName + " must be key value pairs separated by comma, but value: " + value);
@@ -503,50 +503,12 @@ public class Utils {
     return prettyNumber + LARGE_NUMBER_SUFFIXES[suffixIndex];
   }
 
-  /**
-   * WARNING: The code which generates the free port and uses it must always be called within
-   * a try/catch and a loop. There is no guarantee that the port returned will still be
-   * available at the time it is used. This is best-effort only.
-   *
-   * N.B.: Visibility is package-private on purpose.
-   *
-   * @return a free port to be used by tests.
-   */
-  public static int getFreePort() {
-    try (ServerSocket socket = new ServerSocket(0)) {
-      return socket.getLocalPort();
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-  }
-
   public static String getUniqueString() {
     return getUniqueString("");
   }
 
   public static String getUniqueString(String prefix) {
     return String.format("%s_%x_%x", prefix, System.nanoTime(), ThreadLocalRandom.current().nextInt());
-  }
-
-  public static String getUniqueTopicString(String prefix) {
-    int typesNum = PubSubTopicType.values().length;
-    int pubSubTopicTypeIndex = Math.abs(ThreadLocalRandom.current().nextInt() % typesNum);
-    PubSubTopicType pubSubTopicType = PubSubTopicType.values()[pubSubTopicTypeIndex];
-    int version = Math.abs(ThreadLocalRandom.current().nextInt() % typesNum);
-    if (pubSubTopicType.equals(PubSubTopicType.REALTIME_TOPIC)) {
-      return getUniqueString(prefix) + Version.REAL_TIME_TOPIC_SUFFIX;
-    } else if (pubSubTopicType.equals(PubSubTopicType.REPROCESSING_TOPIC)) {
-      return getUniqueString(prefix) + Version.VERSION_SEPARATOR + (version) + Version.STREAM_REPROCESSING_TOPIC_SUFFIX;
-    } else if (pubSubTopicType.equals(PubSubTopicType.VERSION_TOPIC)) {
-      return getUniqueString(prefix) + Version.VERSION_SEPARATOR + (version);
-    } else if (pubSubTopicType.equals(PubSubTopicType.ADMIN_TOPIC)) {
-      return pubSubTopicType.ADMIN_TOPIC_PREFIX + getUniqueString(prefix);
-    } else if (pubSubTopicType.equals(PubSubTopicType.VIEW_TOPIC)) {
-      return getUniqueString(prefix) + Version.VERSION_SEPARATOR + (version)
-          + ChangeCaptureView.CHANGE_CAPTURE_TOPIC_SUFFIX;
-    } else {
-      throw new VeniceException("Unsupported topic type for: " + pubSubTopicType);
-    }
   }
 
   public static String getUniqueTempPath() {
@@ -809,10 +771,16 @@ public class Utils {
       for (String resourceName: resourceNames) {
         PartitionAssignment partitionAssignment = resourceAssignment.getPartitionAssignment(resourceName);
         for (Partition partition: partitionAssignment.getAllPartitions()) {
-          String status = partition.getInstanceStatusById(instanceId);
-          if (status != null) {
+          HelixState helixState = partition.getHelixStateByInstanceId(instanceId);
+          ExecutionStatus executionStatus = partition.getExecutionStatusByInstanceId(instanceId);
+          if (helixState != null || executionStatus != null) {
+            /**
+             * N.B.: We only add the {@link Replica} to the returned list if the partition is hosted on the provided
+             * {@param instanceId}, which we consider to be the case if the {@link Partition} object carries either
+             * an {@link ExecutionStatus} and/or a {@link HelixState} for it.
+             */
             Replica replica = new Replica(Instance.fromNodeId(instanceId), partition.getId(), resourceName);
-            replica.setStatus(status);
+            replica.setStatus(helixState);
             replicas.add(replica);
           }
         }

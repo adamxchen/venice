@@ -15,7 +15,8 @@ import com.linkedin.venice.controller.lingeringjob.LingeringStoreVersionChecker;
 import com.linkedin.venice.controller.supersetschema.SupersetSchemaGenerator;
 import com.linkedin.venice.kafka.protocol.KafkaMessageEnvelope;
 import com.linkedin.venice.pubsub.PubSubTopicRepository;
-import com.linkedin.venice.pubsub.kafka.KafkaPubSubMessageDeserializer;
+import com.linkedin.venice.pubsub.api.PubSubClientsFactory;
+import com.linkedin.venice.pubsub.api.PubSubMessageDeserializer;
 import com.linkedin.venice.schema.SchemaReader;
 import com.linkedin.venice.schema.writecompute.WriteComputeSchemaConverter;
 import com.linkedin.venice.serialization.avro.AvroProtocolDefinition;
@@ -53,7 +54,8 @@ public class VeniceControllerService extends AbstractVeniceService {
       Optional<ClientConfig> routerClientConfig,
       Optional<ICProvider> icProvider,
       Optional<SupersetSchemaGenerator> externalSupersetSchemaGenerator,
-      PubSubTopicRepository pubSubTopicRepository) {
+      PubSubTopicRepository pubSubTopicRepository,
+      PubSubClientsFactory pubSubClientsFactory) {
     this.multiClusterConfigs = multiClusterConfigs;
     VeniceHelixAdmin internalAdmin = new VeniceHelixAdmin(
         multiClusterConfigs,
@@ -63,7 +65,8 @@ public class VeniceControllerService extends AbstractVeniceService {
         sslConfig,
         accessController,
         icProvider,
-        pubSubTopicRepository);
+        pubSubTopicRepository,
+        pubSubClientsFactory);
 
     if (multiClusterConfigs.isParent()) {
       this.admin = new VeniceParentHelixAdmin(
@@ -108,13 +111,12 @@ public class VeniceControllerService extends AbstractVeniceService {
     // newSchemaEncountered // TODO: Wire in this hook once we figure out a clean way to do it
     );
     kafkaMessageEnvelopeSchemaReader.ifPresent(kafkaValueSerializer::setSchemaReader);
-    KafkaPubSubMessageDeserializer pubSubMessageDeserializer = new KafkaPubSubMessageDeserializer(
+    PubSubMessageDeserializer pubSubMessageDeserializer = new PubSubMessageDeserializer(
         kafkaValueSerializer,
         new LandFillObjectPool<>(KafkaMessageEnvelope::new),
         new LandFillObjectPool<>(KafkaMessageEnvelope::new));
     for (String cluster: multiClusterConfigs.getClusters()) {
       AdminConsumerService adminConsumerService = new AdminConsumerService(
-          cluster,
           internalAdmin,
           multiClusterConfigs.getControllerConfig(cluster),
           metricsRepository,
@@ -124,6 +126,7 @@ public class VeniceControllerService extends AbstractVeniceService {
 
       this.admin.setAdminConsumerService(cluster, adminConsumerService);
     }
+
   }
 
   private LingeringStoreVersionChecker createLingeringStoreVersionChecker(

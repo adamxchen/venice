@@ -44,6 +44,8 @@ import com.linkedin.venice.meta.ReadOnlyLiveClusterConfigRepository;
 import com.linkedin.venice.meta.ReadOnlySchemaRepository;
 import com.linkedin.venice.meta.ReadOnlyStoreRepository;
 import com.linkedin.venice.meta.StaticClusterInfoProvider;
+import com.linkedin.venice.pubsub.adapter.kafka.admin.ApacheKafkaAdminAdapterFactory;
+import com.linkedin.venice.pubsub.adapter.kafka.consumer.ApacheKafkaConsumerAdapterFactory;
 import com.linkedin.venice.pubsub.adapter.kafka.producer.ApacheKafkaProducerAdapterFactory;
 import com.linkedin.venice.pubsub.api.PubSubClientsFactory;
 import com.linkedin.venice.schema.SchemaReader;
@@ -59,6 +61,7 @@ import com.linkedin.venice.stats.BackupVersionOptimizationServiceStats;
 import com.linkedin.venice.stats.DiskHealthStats;
 import com.linkedin.venice.stats.VeniceJVMStats;
 import com.linkedin.venice.utils.CollectionUtils;
+import com.linkedin.venice.utils.LatencyUtils;
 import com.linkedin.venice.utils.Utils;
 import com.linkedin.venice.utils.lazy.Lazy;
 import io.tehuti.metrics.MetricsRepository;
@@ -149,7 +152,11 @@ public class VeniceServer {
             .setClientConfigForConsumer(clientConfigForConsumer.orElse(null))
             .setIcProvider(icProvider)
             .setServiceDiscoveryAnnouncers(serviceDiscoveryAnnouncers)
-            .setPubSubClientsFactory(new PubSubClientsFactory(new ApacheKafkaProducerAdapterFactory()))
+            .setPubSubClientsFactory(
+                new PubSubClientsFactory(
+                    new ApacheKafkaProducerAdapterFactory(),
+                    new ApacheKafkaConsumerAdapterFactory(),
+                    new ApacheKafkaAdminAdapterFactory()))
             .build());
   }
 
@@ -335,7 +342,7 @@ public class VeniceServer {
     CompletableFuture<HelixCustomizedViewOfflinePushRepository> customizedViewFuture =
         managerFuture.thenApply(manager -> {
           HelixCustomizedViewOfflinePushRepository customizedView =
-              new HelixCustomizedViewOfflinePushRepository(manager);
+              new HelixCustomizedViewOfflinePushRepository(manager, metadataRepo, false);
           customizedView.refresh();
           return customizedView;
         });
@@ -558,6 +565,7 @@ public class VeniceServer {
    * */
   public void shutdown() throws VeniceException {
     List<Exception> exceptions = new ArrayList<>();
+    long startTimeMS = System.currentTimeMillis();
     LOGGER.info("Stopping all services");
 
     /* Stop in reverse order */
@@ -588,7 +596,6 @@ public class VeniceServer {
         }
       }
       LOGGER.info("All services have been stopped");
-
       compressorFactory.close();
 
       try {
@@ -605,6 +612,7 @@ public class VeniceServer {
         LOGGER.error("Exception while closing: {}", zkClient.getClass().getSimpleName(), e);
       }
 
+      LOGGER.info("Shutdown completed in {} ms", LatencyUtils.getLatencyInMS(startTimeMS));
       if (exceptions.size() > 0) {
         throw new VeniceException(exceptions.get(0));
       }
@@ -693,25 +701,40 @@ public class VeniceServer {
     } catch (Exception e) {
       LOGGER.error("Error starting Venice Server ", e);
       Utils.exit("Error while loading configuration: " + e.getMessage());
+      return;
     }
+    run(veniceConfigService, true);
+  }
 
+  public static void run(String configDirectory, boolean joinThread) throws Exception {
+    VeniceConfigLoader veniceConfigService = VeniceConfigLoader.loadFromConfigDirectory(configDirectory);
+    run(veniceConfigService, joinThread);
+  }
+
+  public static void run(VeniceConfigLoader veniceConfigService, boolean joinThread) throws Exception {
+    PubSubClientsFactory pubSubClientsFactory = new PubSubClientsFactory(
+        new ApacheKafkaProducerAdapterFactory(),
+        new ApacheKafkaConsumerAdapterFactory(),
+        new ApacheKafkaAdminAdapterFactory());
     VeniceServerContext serverContext = new VeniceServerContext.Builder().setVeniceConfigLoader(veniceConfigService)
-        .setPubSubClientsFactory(new PubSubClientsFactory(new ApacheKafkaProducerAdapterFactory()))
+        .setPubSubClientsFactory(pubSubClientsFactory)
         .build();
     final VeniceServer server = new VeniceServer(serverContext);
     if (!server.isStarted()) {
       server.start();
     }
     addShutdownHook(server);
+
+    if (joinThread) {
+      try {
+        Thread.currentThread().join();
+      } catch (InterruptedException e) {
+        LOGGER.error("Unable to join thread in shutdown hook. ", e);
+      }
+    }
   }
 
   private static void addShutdownHook(VeniceServer server) {
     Runtime.getRuntime().addShutdownHook(new Thread(server::shutdown));
-
-    try {
-      Thread.currentThread().join();
-    } catch (InterruptedException e) {
-      LOGGER.error("Unable to join thread in shutdown hook. ", e);
-    }
   }
 }

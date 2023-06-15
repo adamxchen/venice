@@ -41,6 +41,8 @@ public class ConfigKeys {
   public static final String KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS =
       ApacheKafkaProducerConfig.KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS;
 
+  public static final String KAFKA_CLIENT_ID_CONFIG = ApacheKafkaConsumerConfig.KAFKA_CLIENT_ID_CONFIG;
+  public static final String KAFKA_GROUP_ID_CONFIG = ApacheKafkaConsumerConfig.KAFKA_GROUP_ID_CONFIG;
   public static final String KAFKA_AUTO_OFFSET_RESET_CONFIG = ApacheKafkaConsumerConfig.KAFKA_AUTO_OFFSET_RESET_CONFIG;
   public static final String KAFKA_ENABLE_AUTO_COMMIT_CONFIG =
       ApacheKafkaConsumerConfig.KAFKA_ENABLE_AUTO_COMMIT_CONFIG;
@@ -362,6 +364,12 @@ public class ConfigKeys {
   public static final String CONTROLLER_PARENT_EXTERNAL_SUPERSET_SCHEMA_GENERATION_ENABLED =
       "controller.parent.external.superset.schema.generation.enabled";
 
+  /**
+   * Whether to initialize system schemas when controller starts. Default is true.
+   */
+  public static final String SYSTEM_SCHEMA_INITIALIZATION_AT_START_TIME_ENABLED =
+      "system.schema.initialization.at.start.time.enabled";
+
   // Server specific configs
   public static final String LISTENER_PORT = "listener.port";
 
@@ -392,13 +400,32 @@ public class ConfigKeys {
   public static final String SERVER_NETTY_GRACEFUL_SHUTDOWN_PERIOD_SECONDS =
       "server.netty.graceful.shutdown.period.seconds";
   public static final String SERVER_NETTY_WORKER_THREADS = "server.netty.worker.threads";
-  public static final String SSL_TO_KAFKA = ApacheKafkaProducerConfig.SSL_TO_KAFKA;
+
+  /**
+   * This config key is a misspelling. It is now considered deprecated.
+   * @deprecated Use {@link KAFKA_OVER_SSL}
+   */
+  @Deprecated
+  public static final String SSL_TO_KAFKA_LEGACY = ApacheKafkaProducerConfig.SSL_TO_KAFKA_LEGACY;
+  public static final String KAFKA_OVER_SSL = ApacheKafkaProducerConfig.KAFKA_OVER_SSL;
   public static final String SERVER_COMPUTE_THREAD_NUM = "server.compute.thread.num";
   public static final String HYBRID_QUOTA_ENFORCEMENT_ENABLED = "server.hybrid.quota.enforcement.enabled";
   public static final String SERVER_DATABASE_MEMORY_STATS_ENABLED = "server.database.memory.stats.enabled";
 
   public static final String ROUTER_MAX_READ_CAPACITY = "router.max.read.capacity";
   public static final String ROUTER_QUOTA_CHECK_WINDOW = "router.quota.check.window";
+
+  /**
+   * This instructs the router to start running with self signed TLS certificates as opposed to those
+   * provided via other properties. This should only be used for testing and defaults to true when running
+   * RouterServer.main().
+   */
+  public static final String ROUTER_USE_LOCAL_SSL_SETTINGS = "router.local.ssl";
+
+  /**
+   * This instructs the router to open an ssl port. This defaults to true.
+   */
+  public static final String ROUTER_ENABLE_SSL = "router.enable.ssl";
 
   public static final String SERVER_REMOTE_INGESTION_REPAIR_SLEEP_INTERVAL_SECONDS =
       "server.remote.ingestion.repair.sleep.interval.seconds";
@@ -547,11 +574,6 @@ public class ConfigKeys {
    * Check the available types in {@literal com.linkedin.venice.config.BlockingQueueType}
    */
   public static final String SERVER_BLOCKING_QUEUE_TYPE = "server.blocking.queue.type";
-
-  /**
-   * This config is used to control whether openssl is enabled for Kafka consumers in server.
-   */
-  public static final String SERVER_ENABLE_KAFKA_OPENSSL = "server.enable.kafka.openssl";
 
   /**
    * This config is used to control how much time Server will wait for connection warming from Routers.
@@ -1181,7 +1203,7 @@ public class ConfigKeys {
    * A list of fabrics that are source(s) of the active active real time replication. When active-active replication
    * is enabled on the controller {@link #ACTIVE_ACTIVE_ENABLED_ON_CONTROLLER} is true, this list should contain fabrics
    * where the Venice server should consume from when it accepts the TS (TopicSwitch) message.
-   * Example value of this config: "dc-0,dc-1,dc-2".
+   * Example value of this config: "dc-0, dc-1, dc-2".
    */
   public static final String ACTIVE_ACTIVE_REAL_TIME_SOURCE_FABRIC_LIST = "active.active.real.time.source.fabric.list";
 
@@ -1401,6 +1423,11 @@ public class ConfigKeys {
    * header field.
    */
   public static final String ROUTER_HTTP2_MAX_HEADER_LIST_SIZE = "router.http2.max.header.list.size";
+
+  /**
+   * Whether to enable openssl in the Router http client when talking to server.
+   */
+  public static final String ROUTER_HTTP_CLIENT_OPENSSL_ENABLED = "router.http.client.openssl.enabled";
 
   /**
    * In Leader/Follower state transition model, in order to avoid split brain problem (multiple leaders) as much as possible,
@@ -1625,6 +1652,27 @@ public class ConfigKeys {
    * Config to control if push status store is enabled and should be initialized
    */
   public static final String PUSH_STATUS_STORE_ENABLED = "push.status.store.enabled";
+
+  // Config to check whether the offline push will also monitor Da Vinci push status.
+  public static final String DAVINCI_PUSH_STATUS_SCAN_ENABLED = "davinci.push.status.scan.enabled";
+
+  // Config to determine the Da Vinci push status scanning interval in seconds.
+  public static final String DAVINCI_PUSH_STATUS_SCAN_INTERVAL_IN_SECONDS =
+      "davinci.push.status.scan.interval.in.seconds";
+
+  // Config to determine the Da Vinci push status scanning worker thread number.
+  public static final String DAVINCI_PUSH_STATUS_SCAN_THREAD_NUMBER = "davinci.push.status.scan.thread.number";
+
+  /**
+   * Max retry when not receiving any DaVinci status report.
+   * This is mainly for testing purpose since in local integration test, the push job runs too fast in the backend,
+   * and no DaVinci status report will mark the push job succeed right away.
+   */
+  public static final String DAVINCI_PUSH_STATUS_SCAN_NO_REPORT_RETRY_MAX_ATTEMPTS =
+      "davinci.push.status.scan.no.report.retry.max.attempts";
+
+  public static final String DAVINCI_PUSH_STATUS_SCAN_MAX_OFFLINE_INSTANCE =
+      "davinci.push.status.scan.max.offline.instance";
 
   public static final String CONTROLLER_ZK_SHARED_DAVINCI_PUSH_STATUS_SYSTEM_SCHEMA_STORE_AUTO_CREATION_ENABLED =
       "controller.zk.shared.davinci.push.status.system.schema.store.auto.creation.enabled";
@@ -1868,4 +1916,31 @@ public class ConfigKeys {
    * Config to control the queue capacity for the thread pool executor used for ssl handshake in servers.
    */
   public static final String SERVER_SSL_HANDSHAKE_QUEUE_CAPACITY = "server.ssl.handshake.queue.capacity";
+
+  /**
+   * Number of threads for online Venice producer controlling the number of concurrent write operations.
+   */
+  public static final String CLIENT_PRODUCER_THREAD_NUM = "client.producer.thread.num";
+
+  /**
+   * The refresh interval for online producer to refresh value schemas and update schemas that rely on periodic polling.
+   */
+  public static final String CLIENT_PRODUCER_SCHEMA_REFRESH_INTERVAL_SECONDS =
+      "client.producer.schema.refresh.interval.seconds";
+
+  /*
+   * The memory up-limit for the ingestion path while using RocksDB Plaintable format.
+   * Currently, this option is only meaningful for DaVinci use cases.
+   */
+  public static final String INGESTION_MEMORY_LIMIT = "ingestion.memory.limit";
+
+  /**
+   * Whether the ingestion is using mlock or not.
+   * Currently, this option is only meaningful for DaVinci use cases.
+   *
+   * Actually, this config option is being actively used, and it is a placeholder for the future optimization.
+   * The memory limit logic implemented today is assuming mlock usage, and to make it backward compatible when
+   * we want to do more optimization for non-mlock usage, we will ask the mlock user to enable this flag.
+   */
+  public static final String INGESTION_MLOCK_ENABLED = "ingestion.mlock.enabled";
 }
